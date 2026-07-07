@@ -1,0 +1,47 @@
+
+=== Cluster state snapshot ===
+$ kubectl -n deepep-llmd-shim-test get pods -o wide
+NAME                             READY   STATUS    RESTARTS   AGE    IP           NODE                                       NOMINATED NODE   READINESS GATES
+deepep-v2-epp-5fd4bc4c84-5phrz   2/2     Running   0          20s    10.1.3.100   hyperpod-i-0a3eb6d3953cceaa7               <none>           <none>
+vllm-sim-577bc495db-8rsh5        1/1     Running   0          6m1s   10.1.0.105   ip-10-1-0-198.us-east-2.compute.internal   <none>           <none>
+vllm-sim-577bc495db-jnggk        1/1     Running   0          6m1s   10.1.3.111   hyperpod-i-01aee349f9991c414               <none>           <none>
+$ kubectl -n deepep-llmd-shim-test get svc
+NAME            TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+deepep-v2-epp   ClusterIP   172.20.49.206   <none>        9002/TCP,9090/TCP,8081/TCP   21s
+vllm-sim        ClusterIP   172.20.27.131   <none>        8000/TCP                     6m2s
+$ kubectl -n deepep-llmd-shim-test get inferencepool
+NAME        AGE
+deepep-v2   21s
+
+=== Port-forward EPP service ===
+port-forward ready after 2s
+
+=== GET /v1/models via EPP/Envoy ===
+$ curl -sS -i -o /home/ubuntu/deepep-v2-integration/bench/logs/llmd-shim-smoke-20260429T122517Z/resp-models.txt http://localhost:18081/v1/models
+HTTP/1.1 200 OK
+x-went-into-resp-headers: true
+server: fasthttp
+date: Wed, 29 Apr 2026 12:25:20 GMT
+content-type: application/json
+transfer-encoding: chunked
+
+{"object":"list","data":[{"id":"Qwen/Qwen3-30B-A3B-FP8","object":"model","created":1777465520,"owned_by":"vllm","root":"Qwen/Qwen3-30B-A3B-FP8","parent":null}]}
+=== POST /v1/chat/completions via EPP/Envoy ===
+$ curl -sS -i -o /home/ubuntu/deepep-v2-integration/bench/logs/llmd-shim-smoke-20260429T122517Z/resp-chat.txt -H Content-Type: application/json -d {
+    "model": "Qwen/Qwen3-30B-A3B-FP8",
+    "messages": [{"role": "user", "content": "Say hi in one word."}],
+    "max_tokens": 16,
+    "temperature": 0
+  } http://localhost:18081/v1/chat/completions
+HTTP/1.1 200 OK
+x-went-into-resp-headers: true
+server: fasthttp
+date: Wed, 29 Apr 2026 12:25:20 GMT
+content-type: application/json
+transfer-encoding: chunked
+
+{"id":"chatcmpl-70c8c19a-6cbe-5fe6-abcb-a3e1a1a62c50","created":1777465521,"model":"Qwen/Qwen3-30B-A3B-FP8","usage":{"prompt_tokens":11,"completion_tokens":1,"total_tokens":12},"object":"chat.completion","kv_transfer_params":null,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Today "}}]}
+=== Capture pod logs ===
+
+=== Summary ===
+LLM-D ROUTING SMOKE: PASS -- real completion token returned

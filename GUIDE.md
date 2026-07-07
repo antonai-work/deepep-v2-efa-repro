@@ -34,8 +34,9 @@ page is the map: what to run, in what order, and what "pass" looks like.
 Run them in order: gate 1 validates the substrate every later gate stands on.
 If gate 1 fails, nothing downstream is meaningful — fix the transport first
 (README section 1-3). Gates 2-4 are the AIPerf inference lanes; gates 5-6
-are training (loss/grad-norm, no AIPerf). The full framework map — including
-what is deliberately NOT covered (llm-d, Dynamo) and why — is README §9.
+are training (loss/grad-norm, no AIPerf). llm-d is a router, not a DeepEP
+consumer — its routing lane (validated separately, `llmd/`) and the reason it
+has no DeepEP gate are in README §9; Dynamo likewise.
 
 ## Common steps for every gate
 

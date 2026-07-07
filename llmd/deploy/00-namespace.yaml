@@ -1,0 +1,11 @@
+# Namespace for the llm-d-deepep-v2 shim routing smoke test.
+# Lives alongside the other *-shim-test namespaces (megatron, sglang) so
+# it's clear which K8s areas the V2 integration touches without risking
+# the off-limits deepep-v2-int namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepep-llmd-shim-test
+  labels:
+    llm-d.ai/guide: "deepep-v2-overlay"
+    llm-d.ai/track: "shim"

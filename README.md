@@ -302,7 +302,7 @@ fabric is efa-direct` on all ranks + cross-node-only topology.
 | TRT-LLM | YES (native seam; native EP = MNNVL/IBGDA wall) | wheel + `trtllm-0.21.0-deepep-v2-seam.patch` (§6); api-shim kept as legacy | PR in prep (draft carries the seam); DeepEP arm slower than TRT's own dense arm at low-conc decode | `results/trtllm-deepep-dropin-20260707/` (shim + native-seam) |
 | Megatron-LM | YES (native seam) | `training/megatron/` patch = PR #4632 (§6b) | #4632 OPEN, head publicly fetchable | `results/megatron-shapeY-20260505/` |
 | NeMo-RL | YES (transitive via Megatron) | `training/nemo-rl/` (§6b) | env fix MERGED (#2585) | `results/nemo-rl-rollout-20260429/` |
-| llm-d | NOT APPLICABLE | — | its EFA story is NIXL KV-transfer, orthogonal to MoE all-to-all; no DeepEP surface to integrate | recorded as out-of-scope |
+| llm-d | NOT APPLICABLE as a DeepEP consumer (router/scheduler; its EFA story is NIXL KV-transfer, no MoE a2a surface) | `llmd/` — routing lane: GAIE v1.4.0 + EPP v0.8.0 validated end-to-end against the public sim backend; swap-in recipe for the Gate-2 DeepEP vLLM pods included | GAIE/llm-d releases, all public pins | `results/llmd-routing-20260429/` (routing PASS; real-backend-through-EPP AIPerf = documented open item) |
 | Dynamo (vLLM disagg) | scheduler-level only | rides the vLLM lane for MoE traffic | routing validated in the parent project; no DeepEP-specific delta | out-of-scope here |
 
 Transport constant across every YES row: `deep_ep.ElasticBuffer` over

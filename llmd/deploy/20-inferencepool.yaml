@@ -1,0 +1,35 @@
+# Reference-only: this is what the Helm chart in 30-scheduler-values.yaml
+# will synthesize on its own. It is NOT applied by scripts/install.sh --
+# the chart creates an identical InferencePool named after the release
+# ("deepep-v2") driven by inferencePool.modelServers.matchLabels in the
+# values file.
+#
+# Kept here so reviewers can see the wire shape of the CR without
+# templating the chart locally. If you ever want to manage the pool
+# yourself (e.g. to let kustomize own it), set the chart value
+# `inferenceExtension.endpointsServer.createInferencePool=false`,
+# provide an `endpointSelector` string to the EPP, and apply this file
+# instead.
+#
+# apiVersion must be v1 (inference.networking.k8s.io/v1) - that's the
+# GA channel the optimized-baseline guide ships on in GAIE v1.4.0.
+# The x-k8s.io/v1alpha2 flavor is still present in the CRD bundle but
+# used only for legacy provider compat.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: deepep-v2
+  namespace: deepep-llmd-shim-test
+  labels:
+    llm-d.ai/guide: deepep-v2-overlay
+spec:
+  targetPorts:
+    - number: 8000
+  selector:
+    matchLabels:
+      app: vllm-sim
+      llm-d.ai/model: qwen3-30b-a3b-fp8
+  endpointPickerRef:
+    name: deepep-v2-epp
+    port:
+      number: 9002

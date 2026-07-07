@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+x-went-into-resp-headers: true
+server: fasthttp
+date: Wed, 29 Apr 2026 12:25:20 GMT
+content-type: application/json
+transfer-encoding: chunked
+
+{"object":"list","data":[{"id":"Qwen/Qwen3-30B-A3B-FP8","object":"model","created":1777465520,"owned_by":"vllm","root":"Qwen/Qwen3-30B-A3B-FP8","parent":null}]}

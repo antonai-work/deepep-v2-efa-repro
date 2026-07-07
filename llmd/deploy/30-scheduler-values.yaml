@@ -1,0 +1,92 @@
+# Values file for `helm install ... oci://registry.k8s.io/
+# gateway-api-inference-extension/charts/standalone --version v1.4.0`
+# (the GAIE Standalone chart, which is what the llm-d upstream guide
+#  `optimized-baseline` uses in its Standalone Mode).
+#
+# Deploys all in namespace deepep-llmd-shim-test:
+#   Deployment    deepep-v2-epp (EPP + Envoy sidecar, 1 replica)
+#   Service       deepep-v2-epp (ClusterIP, ports 9002 gRPC ExtProc + 8081 HTTP)
+#   ConfigMap     envoy (Envoy config) + deepep-v2-epp (plugins)
+#   InferencePool deepep-v2 (selects vllm-sim pods by label)
+#   ServiceAccount + RBAC for EPP to read InferencePool / Service / Pod
+#
+# NOTE: the chart creates the InferencePool itself (named after the release,
+# so `deepep-v2`). We configure its label selector via
+# inferencePool.modelServers.matchLabels below so it binds to our
+# vllm-sim Deployment (defined in 10-vllm-sim-deployment.yaml). If we
+# wanted to own the InferencePool separately we would set
+# endpointsServer.createInferencePool=false and supply an endpointSelector
+# string; letting the chart manage it is simpler and the way the upstream
+# optimized-baseline guide recommends.
+#
+# The scheduler image is pinned to llm-d-inference-scheduler v0.8.0
+# (released 2026-04-28, the first release including the optimized-baseline
+# plugin set by default). The upstream base.values.yaml in llm-d v0.6.0
+# pins v0.7.0 which predates some scorer fixes; we bump it here.
+#
+# The plugin config is copied from guides/optimized-baseline/scheduler/
+# optimized-baseline.values.yaml verbatim - queue + kv-cache + prefix
+# scorers, which is the recommended default routing profile for vLLM.
+
+inferenceExtension:
+  replicas: 1
+  image:
+    hub: ghcr.io/llm-d
+    name: llm-d-inference-scheduler
+    tag: v0.8.0
+    pullPolicy: IfNotPresent
+  extProcPort: 9002
+  extraServicePorts:
+    - name: http
+      port: 8081
+      protocol: TCP
+      targetPort: 8081
+  flags:
+    v: 2
+  env: []
+  # Let the chart create an InferencePool (binds using matchLabels below).
+  endpointsServer:
+    createInferencePool: true
+  pluginsConfigFile: "deepep-v2-plugins.yaml"
+  pluginsCustomConfig:
+    deepep-v2-plugins.yaml: |
+      apiVersion: inference.networking.x-k8s.io/v1alpha1
+      kind: EndpointPickerConfig
+      plugins:
+      - type: queue-scorer
+      - type: kv-cache-utilization-scorer
+      - type: prefix-cache-scorer
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: queue-scorer
+          weight: 2
+        - pluginRef: kv-cache-utilization-scorer
+          weight: 2
+        - pluginRef: prefix-cache-scorer
+          weight: 3
+  monitoring:
+    prometheus:
+      enabled: false
+
+# We keep the Envoy sidecar inherited from the chart default (distroless
+# envoy v1.33.2). The sidecar listens on 8081 (vLLM-compat traffic) and
+# 19001 (Prometheus /stats + /ready). Curling the EPP Service on port
+# 8081 hits Envoy which runs the ExtProc filter against the EPP on 9002.
+
+# Binds InferencePool to our vllm-sim backend via labels. Those labels
+# must agree with spec.selector and template.metadata.labels in
+# 10-vllm-sim-deployment.yaml.
+inferencePool:
+  apiVersion: inference.networking.k8s.io/v1
+  targetPorts:
+    - number: 8000
+  targetPortNumber: 8000
+  modelServerType: vllm
+  modelServers:
+    matchLabels:
+      app: vllm-sim
+      llm-d.ai/model: qwen3-30b-a3b-fp8
+
+provider:
+  name: none
