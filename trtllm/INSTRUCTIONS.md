@@ -74,6 +74,32 @@ The build does (full detail in the script): trtllm 0.21 (prewheel to dodge the s
 cuda-12.9 cudart + `deep_ep._C` rebuild vs torch 2.7.1 + the **9c44d34** GIN-v13 plugin + gdrdrv-2.4 init-gate
 relax + the MNNVL-x86 NVML-crash short-circuit.
 
+### 2-alt. Bring-up on a LIVE cu13 serving pod (venv-isolated; no image rebuild)
+
+If the pods already carry the cu13 serving stack (torch 2.11+cu130, `/opt/DeepEP`
+with a built `_C`, the 9c44 GIN plugin — i.e. they just passed the vLLM/SGLang
+gates), use `scripts/09-bringup-venv-on-live-cu13-pod.sh` instead of steps 0–2.
+It builds the whole TRT chain inside `/tmp/venv-trt` (python3.10, no system
+site) + a synthesized `/tmp/cuda12` toolchain, and **never mutates the serving
+stack** — deep_ep is rebuilt in a COPY (`/tmp/DeepEP-cu12`). This is the exact
+chain behind the 2026-07-07 AIPerf 3-cell PASS (66.5/147.5/586.7 agg tok/s,
+0 err). The script header documents the five walls it encodes (cuda-python
+12.9 pin, redist nvcc, `EP_NCCL_ROOT_DIR` vs the venv nccl-2.26 shadow, cu12
+math headers + unversioned `.so` names, offline AIPerf tokenizer).
+
+```bash
+for n in 0 1; do
+  kubectl -n $NS cp scripts/09-bringup-venv-on-live-cu13-pod.sh ${APP}-$n:/tmp/
+  kubectl -n $NS exec ${APP}-$n -- bash -c \
+    'nohup bash /tmp/09-bringup-venv-on-live-cu13-pod.sh >/tmp/t5.log 2>&1 & echo launched'
+done
+# poll: kubectl -n $NS exec ${APP}-0 -- cat /tmp/t5_done   (expect rc=0)
+```
+
+Serve with the venv counterpart `scripts/10-serve-venv-deepep-arm.sh` in step 4
+(same env contract as 08, paths swapped to the venv/`/tmp` layout; requires
+`PLUGIN=<abs path to the pod's gdrdrv-safe libnccl-net-ofi.so>`).
+
 ## 3. Cross-pod SSH (TRT-LLM is MPI-based; mpirun needs ssh between pods)
 
 ```bash
@@ -171,3 +197,7 @@ kubectl -n $NS get pods -l app=$APP        # confirm 0 pods => nodes released
 | `GIN/Plugin: Failed to initialize` / `props.ginType==NONE` | base plugin GIN ABI too old, or gdrdrv-2.4 init gate | bringup builds 9c44d34 (v13) + relaxes the gate |
 | `bindings.so: undefined symbol c10::SymInt::sym_ne` | a dep churn bumped torch off 0.21's ABI | `scripts/07-recover-coherent-021-deps.sh` (restore the coherent set; reference the untouched sibling pod) |
 | ElasticBuffer.combine 719 | gdrdrv kernel 2.4 + a non-9c44d34 plugin | ensure `NCCL_NET_PLUGIN=/opt/aws-ofi-9c44/src/.libs/libnccl-net-ofi.so` |
+| deep_ep build: `nccl_device/core.h: No such file` or import `undefined symbol: ncclTeamWorld` | a stray nccl 2.2x (e.g. trtllm dep `nvidia-nccl-cu12==2.26.2`) wins `find_nccl_root()` / torch RPATH | `EP_NCCL_ROOT_DIR=<2.30.4 root>` at build + force-reinstall `nvidia-nccl-cu13==2.30.4` in the serving env (09 script does both) |
+| deep_ep build: `No such file or directory: .../bin/nvcc` | pip `nvidia-cuda-nvcc-cu12` ships ONLY ptxas | real `cuda_nvcc` archive from `developer.download.nvidia.com/compute/cuda/redist` (09 script step 3) |
+| deep_ep build: `fatal error: cusparse.h` then `ld: cannot find -lcudart` | synthesized CUDA_HOME missing torch's math-lib headers + unversioned `.so` linker names | link `nvidia-cusparse/cublas/cusolver/curand-cu12` includes+libs and create `libcudart.so -> libcudart.so.12` etc. (09 script) |
+| AIPerf: `Failed to load tokenizer '<hash>'` | model served by PATH -> served id is the snapshot hash, not a HF repo id | pass `TOKENIZER=<local snapshot dir>` (offline pods also need `HF_HOME` set) |

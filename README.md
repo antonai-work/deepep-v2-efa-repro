@@ -1,13 +1,16 @@
-# REPRODUCE — DeepEP-V2 (NCCL-GIN CPU-proxy) on AWS EFA, all gates, PUBLIC roots only
+# DeepEP-V2 MoE on AWS EFA — reproduce all four gates from PUBLIC roots only
 
-Reproduce every acceptance gate of this tree — the **micro D+C benchmark**, the
+> New here? **Start with [GUIDE.md](GUIDE.md)** — what to run, in what order,
+> and what "pass" looks like. This page is the full recipe + measured numbers.
+
+Reproduce all four acceptance gates — the **micro D+C benchmark**, the
 **vLLM + AIPerf** lane, the **SGLang + AIPerf** lane, and the **TRT-LLM
 (api-shim) + AIPerf** lane — starting from **public upstreams only**: official
 NVIDIA NGC bases, `deepseek-ai/DeepEP`, PyPI wheels (`vllm`, `sglang`,
 `tensorrt_llm`), `aws/aws-ofi-nccl`, and the patch files committed in this
-repo. No image, fork, or registry we published is required anywhere
-(chain-of-custody rule 7). Measured numbers below are from the 2026-07-06/07
-runs on 2x p5en.48xlarge (H200, EFA, gdrdrv kernel 2.4).
+repo. No image, fork, or registry we published is required anywhere.
+Measured numbers below are from the 2026-07-06/07 runs on 2x p5en.48xlarge
+(H200, EFA, gdrdrv kernel 2.4); the as-run artifacts are under `results/`.
 
 The ONE transport in scope: `deep_ep.ElasticBuffer` over **NCCL-GIN v2
 CPU-proxy** (`NCCL_GIN_TYPE=2`, `OFI_NCCL_GIN_GDAKI=0`). Never GDAKI/IBGDA —
@@ -214,12 +217,16 @@ fabric is efa-direct` x16. The c4 cell reproduces the 2026-06-22 baseline
 (64.2) at 1.04x. Honest verdict unchanged: on EFA's CPU-proxy path TRT-LLM's
 DeepEP arm loses to its own dense arm (106.4 at c4 — WHY-TRT-SLOW.md); the
 gate is "serves + AIPerf clean + backend-asserted", which it does.
-Bring-up walls beyond the packaged scripts (all now pinned in them):
-cuda-python MUST be 12.9.0 (trtllm resolver pulls 13.x -> `from cuda import
-cuda` ImportError), and deep_ep's `_C` build needs `EP_NCCL_ROOT_DIR` pointed
-at nccl 2.30.4 (a stray venv nccl 2.26 loses `nccl_device/core.h` +
-`ncclTeamWorld`). Full forensics:
-`results/trtllm-deepep-dropin-20260707/trtllm/t6_aiperf_trtllm_summary.json`.
+Two bring-up routes, both committed: from-scratch image
+(`trtllm/Dockerfile` + `scripts/00*`) or on a LIVE cu13 serving pod
+without touching its stack (`scripts/09-bringup-venv-on-live-cu13-pod.sh` +
+`scripts/10-serve-venv-deepep-arm.sh` — the exact as-run 2026-07-07 chain).
+The walls are pinned in the scripts: cuda-python MUST be 12.9.0 (trtllm
+resolver pulls 13.x -> `from cuda import cuda` ImportError); deep_ep's `_C`
+build needs `EP_NCCL_ROOT_DIR` at nccl 2.30.4 (a stray venv nccl 2.26 loses
+`nccl_device/core.h` + `ncclTeamWorld`); pip's nvcc wheel is ptxas-only (use
+the official redist archive); AIPerf offline needs `TOKENIZER=<snapshot dir>`.
+Per-wall troubleshooting table: `trtllm/INSTRUCTIONS.md`.
 
 ## 7. Expected-numbers summary
 
