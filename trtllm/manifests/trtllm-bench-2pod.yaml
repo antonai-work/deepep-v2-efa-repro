@@ -1,0 +1,105 @@
+# =============================================================================
+# TRT-LLM DeepEP-V2-on-EFA bench — 2-pod EP16 StatefulSet.
+#
+# HARD RULE (CLAUDE.md, 2026-06-23): image: MUST be built FROM an official NVIDIA NGC base.
+# NEVER point image: at any image WE created (private OR public) — no ghcr.io/antonai-work/*,
+# no */efa-gda* ECR. Build ../Dockerfile (it is `FROM nvcr.io/nvidia/cuda:12.9.0-devel-ubuntu24.04`
+# and builds EFA + gdrcopy + torch-cu13 + DeepEP-V2 + the TRT chain from public sources),
+# push it to YOUR registry, and set image: to YOUR tag below.
+#
+# Pods idle on `sleep infinity`; serve/A-B/AIPerf are driven by `kubectl exec` per
+# INSTRUCTIONS.md. (If you used the in-pod-build path instead of baking the Dockerfile, the
+# idle image must STILL be the NGC-substrate image — never the convenience base.)
+#
+# A reproducer edits ONLY the marked <<< EDIT >>> lines:
+#   1. image:        YOUR registry/tag for the image built from ../Dockerfile (NGC-rooted).
+#   2. nodeSelector: your p5en/p5 instance-type label.
+#   3. vpc.amazonaws.com/efa: your cluster's EFA device-plugin resource name + count
+#                            (p5en.48xlarge = 16; p5.48xlarge = 32).
+#   4. model-cache:  emptyDir (re-downloads model each pod recreate) OR a PVC (persist).
+#
+# 2 pods x 8 GPU = EP16. EP16 is MANDATORY for the DeepEP arm: TRT-LLM only selects
+# AlltoallMethodType.DeepEP when moe_ep_size > top_k (Qwen3 top_k=8) -> needs >8 -> 2 nodes.
+# =============================================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trtllm-efa-bench
+  labels: {app: trtllm-efa-bench}
+spec:
+  clusterIP: None
+  selector: {app: trtllm-efa-bench}
+  ports:
+    - {name: rdzv,  port: 29555, targetPort: 29555}    # shim torch-PG TCPStore rendezvous
+    - {name: ssh,   port: 2222,  targetPort: 2222}     # cross-pod sshd for mpirun (TRT is MPI-based)
+    - {name: serve, port: 8000,  targetPort: 8000}     # OpenAI-compatible serve port
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: trtllm-efa-bench
+  labels: {app: trtllm-efa-bench}
+spec:
+  podManagementPolicy: Parallel
+  replicas: 2                          # 2 x 8 GPU = EP16
+  serviceName: trtllm-efa-bench
+  selector:
+    matchLabels: {app: trtllm-efa-bench}
+  template:
+    metadata:
+      labels: {app: trtllm-efa-bench}
+    spec:
+      affinity:
+        podAntiAffinity:               # 1 pod per node => 2 distinct p5en
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app: trtllm-efa-bench}
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5en.48xlarge      # <<< EDIT: your GPU node label
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Exists}
+      # imagePullSecrets:                                     # base is PUBLIC; only needed if you bake a private image
+      #   - {name: my-registry-pull}
+      hostIPC: true
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: bench
+          image: YOUR_REGISTRY/trtllm-efa:ngc-from-scratch    # <<< EDIT: image built from ../Dockerfile (FROM nvcr.io/nvidia/cuda; NOT any image we published)
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              # gdrdrv device node for the CPU-proxy GIN path
+              if [ ! -c /dev/gdrdrv ]; then mknod /dev/gdrdrv c 237 0 || true; chmod 666 /dev/gdrdrv || true; fi
+              mkdir -p /data/hf-cache
+              echo "trtllm bench pod ready — drive via kubectl exec (see INSTRUCTIONS.md)"
+              sleep infinity
+          env:
+            - {name: POD_NAME,  valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+            - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+            - {name: HF_HOME, value: /data/hf-cache}
+            - {name: NVIDIA_DRIVER_CAPABILITIES, value: "compute,utility"}
+            - {name: NVIDIA_VISIBLE_DEVICES, value: "all"}
+            # - {name: HF_TOKEN, value: "hf_..."}             # <<< EDIT: if the model is gated
+          resources:
+            limits:   {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, hugepages-2Mi: 8Gi, memory: 1500Gi}   # <<< EDIT efa name+count
+            requests: {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, hugepages-2Mi: 8Gi, memory: 1400Gi, cpu: "32"}
+          securityContext:
+            privileged: true
+            capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_ADMIN]}
+          volumeMounts:
+            - {mountPath: /dev/shm, name: dev-shm}
+            - {mountPath: /dev, name: dev-host}
+            - {mountPath: /dev/hugepages, name: hugepages}
+            - {mountPath: /data, name: model-cache}
+      volumes:
+        - {name: dev-shm, emptyDir: {medium: Memory, sizeLimit: 64Gi}}
+        - {name: dev-host, hostPath: {path: /dev, type: Directory}}
+        - {name: hugepages, emptyDir: {medium: HugePages}}
+        # model-cache: emptyDir re-downloads Qwen3-30B (~60GB) on each pod recreate.
+        # For repeated runs, replace with a PVC to persist the HF cache:        # <<< EDIT
+        - {name: model-cache, emptyDir: {sizeLimit: 400Gi}}
+        # - {name: model-cache, persistentVolumeClaim: {claimName: your-pvc}}

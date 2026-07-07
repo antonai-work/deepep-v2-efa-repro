@@ -1,0 +1,4 @@
+enable_attention_dp: true
+moe_backend: CUTLASS
+use_cuda_graph: false
+print_iter_log: true

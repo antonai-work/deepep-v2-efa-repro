@@ -1,0 +1,99 @@
++ grep -iE 'AlltoallMethodType|Uvicorn running|returned error' /tmp/trt_serve_deepep.log
++ grep -iE 'AlltoallMethodType|Uvicorn running|returned error' /tmp/trt_serve_deepep.log
+[07/07/2026-06:57:28] [TRT-LLM] [RANK 0] [I] CutlassFusedMoE selects alltoall_method_type <AlltoallMethodType.DeepEP: 2>
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=7/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=15/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=5/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=9/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=11/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=3/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=8/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=1/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=13/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=0/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=10/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=2/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=12/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=6/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=14/16 master=10.240.123.15:29555
+[trtllm-comm-bridge] lazy-initializing torch.distributed NCCL PG rank=4/16 master=10.240.123.15:29555
+deepep-efa-bench-0:69988:74244 [0] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:69988:74244 [0] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70516:70516 [2] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:70516:70516 [2] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70196:70196 [6] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:70196:70196 [6] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70124:70124 [4] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:70124:70124 [4] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70121:70121 [7] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:70121:70121 [7] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:69992:69992 [3] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:69992:69992 [3] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70190:70190 [1] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:70190:70190 [1] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70193:70193 [5] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-0:70193:70193 [5] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81115:81115 [2] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81115:81115 [2] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81184:81184 [4] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81184:81184 [4] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81118:81118 [7] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81118:81118 [7] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81109:81109 [6] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81109:81109 [6] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81106:81106 [1] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81106:81106 [1] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81187:81187 [3] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81187:81187 [3] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81112:81112 [0] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81112:81112 [0] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-1:81568:81568 [5] NCCL INFO NET/Plugin: Loaded net plugin Libfabric (v12)
+deepep-efa-bench-1:81568:81568 [5] NCCL INFO NET/OFI Initializing aws-ofi-nccl git-9c44d34
+deepep-efa-bench-0:70124:70124 [4] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70124:70124 [4] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81112:81112 [0] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81112:81112 [0] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:69988:74244 [0] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70516:70516 [2] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70121:70121 [7] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70196:70196 [6] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70193:70193 [5] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70190:70190 [1] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:69992:69992 [3] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:69988:74244 [0] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70121:70121 [7] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81184:81184 [4] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-0:70516:70516 [2] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70190:70190 [1] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70193:70193 [5] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:69992:69992 [3] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70196:70196 [6] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81187:81187 [3] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81118:81118 [7] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81568:81568 [5] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81106:81106 [1] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81109:81109 [6] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81184:81184 [4] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81115:81115 [2] NCCL INFO NET/OFI Selected provider is efa, fabric is efa-direct (found 16 nics)
+deepep-efa-bench-1:81187:81187 [3] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81118:81118 [7] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81106:81106 [1] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81568:81568 [5] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81109:81109 [6] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81115:81115 [2] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70516:70516 [2] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:69988:74244 [0] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:69992:69992 [3] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70121:70121 [7] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70190:70190 [1] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81115:81115 [2] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70193:70193 [5] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70196:70196 [6] NCCL INFO Using network Libfabric
+deepep-efa-bench-0:70124:70124 [4] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81118:81118 [7] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81184:81184 [4] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81109:81109 [6] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81106:81106 [1] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81112:81112 [0] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81187:81187 [3] NCCL INFO Using network Libfabric
+deepep-efa-bench-1:81568:81568 [5] NCCL INFO Using network Libfabric

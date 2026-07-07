@@ -1,0 +1,36 @@
+{
+  "date": "2026-07-07",
+  "arm": "deepep-trtllm",
+  "run": "definitive (NCCL_DEBUG=INFO provider-asserted rerun; first run same numbers within noise)",
+  "stack": "tensorrt_llm==0.21.0 (pypi.nvidia.com) + api-shim -> ElasticBuffer, NCCL-GIN v2 CPU-proxy, aws-ofi-nccl 9c44d34 v1-fallback plugin",
+  "serve": "mpirun -np 16 over ssh:2222, 2x p5en (H200) EP16, Qwen/Qwen3-30B-A3B-FP8, enable_attention_dp + CUTLASS",
+  "backend_assert": {
+    "alltoall": "AlltoallMethodType.DeepEP (rank0)",
+    "bridge": "trtllm-comm-bridge x16",
+    "shim_combine": "shim5c combine x16",
+    "efa_provider": "Selected provider is efa, fabric is efa-direct x16"
+  },
+  "cells": {
+    "c32_isl120": {
+      "requests": 128.0,
+      "errors": [],
+      "agg_tok_s": 586.69,
+      "per_user_tok_s": 19.16,
+      "ttft_p50_ms": 202.7
+    },
+    "c4_isl120": {
+      "requests": 40.0,
+      "errors": [],
+      "agg_tok_s": 66.46,
+      "per_user_tok_s": 19.31,
+      "ttft_p50_ms": 159.7
+    },
+    "c8_isl120": {
+      "requests": 64.0,
+      "errors": [],
+      "agg_tok_s": 147.48,
+      "per_user_tok_s": 19.33,
+      "ttft_p50_ms": 163.3
+    }
+  }
+}

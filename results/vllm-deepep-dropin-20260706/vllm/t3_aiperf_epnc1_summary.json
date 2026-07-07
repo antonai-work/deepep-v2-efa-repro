@@ -1,0 +1,51 @@
+{
+  "framework": "vLLM (PUBLIC wheel vllm==0.24.0 \u2014 first official release carrying DeepEPV2All2AllManager; merge e2f993dc is an ancestor)",
+  "date_utc": "2026-07-07T01:0xZ",
+  "arm": "deepep-vllm-epnc1 (EP_NUM_COMMS=1 = pure public-root arm; no fork multi-comm overlay in play)",
+  "topology": "2x p5en.48xlarge H200, EP16 = TP1 x DP16 (8 local ranks per node), model Qwen/Qwen3-30B-A3B-FP8",
+  "transport": "DeepEP V2 ElasticBuffer over NCCL-GIN v2 CPU-proxy (NCCL_GIN_TYPE=2, OFI_NCCL_GIN_GDAKI=0), aws-ofi-nccl 9c44 v1-fallback plugin (gdrdrv-2.4 kernel nodes)",
+  "backend_proof": {
+    "Selected provider is efa (efa-direct, 16 nics)": 8,
+    "constructing deep_ep.ElasticBuffer (t3-patch print)": 3656,
+    "DeepEPV2PrepareAndFinalize": 1,
+    "Using network Libfabric": 32,
+    "legacy Buffer constructed": 0
+  },
+  "aiperf": {
+    "version": "0.10.0",
+    "shape": "ISL120/OSL128, ignore_eos, streaming, completions",
+    "cells": [
+      {
+        "cell": "c4",
+        "concurrency": 4,
+        "requests": 40,
+        "errors": 0,
+        "agg_tps": 19.46,
+        "per_user_tps": 4.94,
+        "ttft_p50_ms": 474.5,
+        "ttft_p99_ms": 1691.2
+      },
+      {
+        "cell": "c8",
+        "concurrency": 8,
+        "requests": 64,
+        "errors": 0,
+        "agg_tps": 38.8,
+        "per_user_tps": 4.92,
+        "ttft_p50_ms": 509.8,
+        "ttft_p99_ms": 756.2
+      },
+      {
+        "cell": "c32",
+        "concurrency": 32,
+        "requests": 128,
+        "errors": 0,
+        "agg_tps": 144.64,
+        "per_user_tps": 4.69,
+        "ttft_p50_ms": 899.0,
+        "ttft_p99_ms": 4651.9
+      }
+    ]
+  },
+  "baseline_note": "campaign 2026-06-20 vLLM conc4 ~38.5 agg_tps was the EPNC=8 multi-comm arm on the private fork build; this EPNC=1 run (~19.5 at c4) is the single-comm baseline arm \u2014 consistent with the documented ~2.09x multi-comm win. EPNC=8 requires the fork-only multi-comm overlay (named GAP, PATCH-DELTA)."
+}

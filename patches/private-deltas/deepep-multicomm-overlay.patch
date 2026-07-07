@@ -1,0 +1,731 @@
+diff --git a/csrc/elastic/buffer.hpp b/csrc/elastic/buffer.hpp
+index f522960..971595c 100644
+--- a/csrc/elastic/buffer.hpp
++++ b/csrc/elastic/buffer.hpp
+@@ -4,6 +4,7 @@
+ #include <memory>
+ #include <vector>
+ #include <pybind11/functional.h>
++#include <pybind11/stl.h>  // G2c-bridge: std::vector<int64_t> extra_nccl_comms <-> Python list
+ 
+ #include <deep_ep/common/layout.cuh>
+ #include <deep_ep/common/compiled.cuh>
+@@ -87,7 +88,8 @@ public:
+                   const bool& prefer_overlap_with_compute,
+                   const int& sl_idx, const int& num_allocated_qps,
+                   const int& num_cpu_timeout_secs, const int& num_gpu_timeout_secs,
+-                  const bool& explicitly_destroy):
++                  const bool& explicitly_destroy,
++                  const std::vector<int64_t>& extra_nccl_comms = {}):
+         num_buffer_bytes(num_buffer_bytes),
+         explicitly_destroy(explicitly_destroy),
+         comm_stream(get_global_comm_stream()),
+@@ -100,7 +102,7 @@ public:
+         this->nccl_context = std::make_shared<nccl::NCCLSymmetricMemoryContext>(
+             nccl_comm, num_ranks, rank_idx,
+             layout::WorkspaceLayout::get_num_bytes() + num_buffer_bytes, kBufferAlignment,
+-            allow_hybrid_mode, sl_idx, num_allocated_qps);
++            allow_hybrid_mode, sl_idx, num_allocated_qps, extra_nccl_comms);
+ 
+         // Timeout
+         this->num_cpu_timeout_secs = num_cpu_timeout_secs;
+@@ -925,7 +927,8 @@ public:
+                         hidden, x.element_size(),
+                         num_sf_packs, sf_token_stride, sf_hidden_stride,
+                         num_experts, num_topk, expert_alignment,
+-                        nccl_context->dev_comm, nccl_context->window,
++                        // G2c: stripe over the K comms (EP_NUM_COMMS); K==1 => slot 0 == stock.
++                        nccl_context->make_gin_dev_comm_array(),
+                         buffer,
+                         workspace, mapped_host_workspace,
+                         nccl_context->scaleout_rank_idx, nccl_context->scaleup_rank_idx,
+@@ -1218,7 +1221,8 @@ public:
+             psum_num_recv_tokens_per_scaleup_rank.data_ptr<int>(),
+             token_metadata_at_forward_ptr,
+             channel_linked_list_ptr,
+-            nccl_context->dev_comm, nccl_context->window,
++            // G2c: stripe over the K comms (EP_NUM_COMMS); K==1 => slot 0 == stock.
++            nccl_context->make_gin_dev_comm_array(),
+             buffer, workspace,
+             num_reduced_tokens, num_max_tokens_per_rank,
+             hidden, num_experts, num_topk,
+@@ -1274,7 +1278,14 @@ public:
+ 
+ static void register_apis(pybind11::module_& m) {
+     pybind11::class_<ElasticBuffer>(m, "ElasticBuffer")
+-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool, int, int, int, int, bool>())
++        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool, bool, bool, int, int, int, int, bool, std::vector<int64_t>>(),
++             pybind11::arg("rank_idx"), pybind11::arg("num_ranks"), pybind11::arg("nccl_comm"),
++             pybind11::arg("num_buffer_bytes"), pybind11::arg("deterministic"),
++             pybind11::arg("allow_hybrid_mode"), pybind11::arg("allow_multiple_reduction"),
++             pybind11::arg("prefer_overlap_with_compute"), pybind11::arg("sl_idx"),
++             pybind11::arg("num_allocated_qps"), pybind11::arg("num_cpu_timeout_secs"),
++             pybind11::arg("num_gpu_timeout_secs"), pybind11::arg("explicitly_destroy"),
++             pybind11::arg("extra_nccl_comms") = std::vector<int64_t>{})
+         .def("destroy", &ElasticBuffer::destroy)
+         .def("get_comm_stream", &ElasticBuffer::get_comm_stream)
+         .def("get_physical_domain_size", &ElasticBuffer::get_physical_domain_size)
+diff --git a/csrc/kernels/backend/api.cuh b/csrc/kernels/backend/api.cuh
+index de00668..94f92cb 100644
+--- a/csrc/kernels/backend/api.cuh
++++ b/csrc/kernels/backend/api.cuh
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <algorithm>
+ #include <memory>
+ #include <vector>
+ #include <optional>
+@@ -7,6 +8,11 @@
+ #include <nccl.h>
+ #include <nccl_device.h>
+ 
++// G2c: `GinDevCommArray` + `kMaxNumComms` live in a MINIMAL standalone header (only needs
++// <nccl_device.h>), so this host-side api.cuh / nccl.cu TU shares the definition WITHOUT
++// pulling comm.cuh -> handle.cuh's device-only ncclGin* (which broke the host compile).
++#include <deep_ep/common/gin_dev_comm_array.cuh>
++
+ // TODO: make a unified API
+ namespace deep_ep::nvshmem {
+ 
+@@ -64,9 +70,20 @@ public:
+     ncclComm_t comm;
+     ncclDevComm_t dev_comm;
+     ncclWindow_t window;
++    // V10-USER-WINDOW: a second window registered over `mapped_window_ptr`
++    // (the polled user buffer). Equals `window` when single-window mode applies.
++    ncclWindow_t user_window;
+     void* mapped_window_ptr;
+     std::vector<void*> nvl_window_ptrs;
+ 
++    // G2b: multi-comm striping (EP_NUM_COMMS). `dev_comms[0] == dev_comm` and
++    // `windows[0] == window` for back-compat; `EP_NUM_COMMS<=1` keeps exactly
++    // one entry in each (byte-identical to stock). The K extra comms each build
++    // their own symmetric window over the SAME `raw_window_ptr` physical buffer.
++    std::vector<ncclComm_t> comms;
++    std::vector<ncclDevComm_t> dev_comms;
++    std::vector<ncclWindow_t> windows;
++
+     // Configs
+     int num_allocated_qps;
+ 
+@@ -74,13 +91,36 @@ public:
+                                const int& num_ranks, const int& rank_idx,
+                                const size_t& size, const size_t& alignment,
+                                const bool& allow_hybrid_mode,
+-                               const int& sl_idx, const int& num_allocated_qps);
++                               const int& sl_idx, const int& num_allocated_qps,
++                               const std::vector<int64_t>& extra_nccl_comms = {});
+ 
+     // TODO: finish this with `explicit_destroy`
+     // ~NCCLSymmetricMemoryContext();
+ 
+     void* get_sym_ptr(void* ptr, const int& dst_rank_idx) const;
+ 
++    // G2b accessors (used by G2c per-channel re-plumb). Wrap-around indexing so a
++    // channel index `k` maps to comm `k % num_comms()`. `k == 0` returns the
++    // stock `dev_comm`/`window`.
++    int num_comms() const { return static_cast<int>(dev_comms.size()); }
++    ncclDevComm_t get_dev_comm(const int& k) const { return dev_comms[k % dev_comms.size()]; }
++    ncclWindow_t get_window(const int& k) const { return windows[k % windows.size()]; }
++
++    // G2c: pack the K dev_comms/windows into a by-value bundle for the dispatch/combine
++    // kernel launch. `n = min(num_comms(), kMaxNumComms)`; unused slots are filled with
++    // slot 0 so an out-of-range `sm_idx % n` can never read garbage. With one comm this
++    // returns `{ {dev_comm}, {window}, 1 }` => the kernels use slot 0 == stock => byte-identical.
++    GinDevCommArray make_gin_dev_comm_array() const {
++        GinDevCommArray arr;
++        const int n = std::min<int>(num_comms(), kMaxNumComms);
++        for (int k = 0; k < kMaxNumComms; ++ k) {
++            arr.comms[k] = dev_comms[k < n ? k : 0];
++            arr.windows[k] = windows[k < n ? k : 0];
++        }
++        arr.num_comms = n;
++        return arr;
++    }
++
+     void finalize() const;
+ };
+ 
+diff --git a/csrc/kernels/backend/nccl.cu b/csrc/kernels/backend/nccl.cu
+index baf38c7..c81bed7 100644
+--- a/csrc/kernels/backend/nccl.cu
++++ b/csrc/kernels/backend/nccl.cu
+@@ -1,3 +1,5 @@
++// V-OWNED-TU-DEFINE applied
++#define EP_OWNED_BY_OWNER_TU 1
+ #include <cstring>
+ #include <memory>
+ #include <vector>
+@@ -65,7 +67,8 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
+                                                        const int& num_ranks, const int& rank_idx,
+                                                        const size_t& size, const size_t& alignment,
+                                                        const bool& allow_hybrid_mode,
+-                                                       const int& sl_idx, const int& num_allocated_qps):
++                                                       const int& sl_idx, const int& num_allocated_qps,
++                                                       const std::vector<int64_t>& extra_nccl_comms):
+     rank_idx(rank_idx), num_ranks(num_ranks), num_allocated_qps(num_allocated_qps) {
+     if (get_env("EP_BUFFER_DEBUG", 0)) {
+         int nccl_version;
+@@ -102,6 +105,20 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
+     }
+     NCCL_CHECK(ncclDevCommCreate(comm, &reqs, &dev_comm));
+ 
++    // G2b: stripe over K independent comms. `comms[0]`/`dev_comms[0]` are the stock
++    // single handle (kept identical); each extra comm gets its own device communicator
++    // using the SAME `reqs`. With `EP_NUM_COMMS<=1` (or no extra handles) the vectors
++    // hold exactly one entry, so the single-comm path is byte-identical to stock.
++    comms.push_back(comm);
++    dev_comms.push_back(dev_comm);
++    for (const auto& extra : extra_nccl_comms) {
++        const auto extra_comm = reinterpret_cast<ncclComm_t>(extra);
++        ncclDevComm_t extra_dev_comm;
++        NCCL_CHECK(ncclDevCommCreate(extra_comm, &reqs, &extra_dev_comm));
++        comms.push_back(extra_comm);
++        dev_comms.push_back(extra_dev_comm);
++    }
++
+     // Now we know the NVLink domain size
+     num_nvl_ranks = dev_comm.lsaSize, nvl_rank_idx = dev_comm.lsaRank;
+     num_rdma_ranks = num_ranks / num_nvl_ranks, rdma_rank_idx = rank_idx / num_nvl_ranks;
+@@ -125,6 +142,38 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
+     NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, size, &window, NCCL_WIN_DEFAULT));
+     NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
+ 
++    /* V10-USER-WINDOW: register mapped_window_ptr as a SECOND window.
++     * NCCL's ncclCommWindowRegister on raw_window_ptr only covers the
++     * 2 MB metadata block. The actual user buffer DeepEP polls lives at
++     * mapped_window_ptr (= raw + 0x200000), in a separate VMM block.
++     * Without this second register, GDAKI signals land at peer's
++     * metadata MR offset, not the polled user buffer.
++     * Evidence chain: evidence/AP-P20/P21/Bv3/V6B/V7/V8/V9/. */
++    if (mapped_window_ptr != raw_window_ptr) {
++        ncclResult_t r = ncclCommWindowRegister(comm, mapped_window_ptr, size,
++                                                &user_window, NCCL_WIN_DEFAULT);
++        if (r != ncclSuccess) {
++            fprintf(stderr, "[V10-USER-WINDOW] WARN: ncclCommWindowRegister(mapped) failed=%d, "
++                            "falling back to single-window mode\n", (int)r);
++            user_window = window;
++        }
++    } else {
++        user_window = window;
++    }
++
++    // G2b: register the SAME `raw_window_ptr` physical buffer as K windows, one per
++    // comm. `windows[0] == window` (the stock window above). Each extra comm builds
++    // its own symmetric window over the shared physical memory (shape b-ii, verified
++    // in G2-derisk). `ncclCommWindowRegister` is collective; all K comms exist on all
++    // ranks (collective `ncclCommInitRank`), so calling it here in ctor order is safe.
++    // With no extra comms `windows` holds exactly one entry == `window`.
++    windows.push_back(window);
++    for (size_t k = 1; k < comms.size(); ++ k) {
++        ncclWindow_t extra_window;
++        NCCL_CHECK(ncclCommWindowRegister(comms[k], raw_window_ptr, size, &extra_window, NCCL_WIN_DEFAULT));
++        windows.push_back(extra_window);
++    }
++
+     // Get LSA pointers for all LSA peers
+     // TODO: check whether this is correct for network with RDMA
+     nvl_window_ptrs.resize(num_nvl_ranks);
+@@ -143,12 +192,18 @@ void* NCCLSymmetricMemoryContext::get_sym_ptr(void* ptr, const int& dst_rank_idx
+ }
+ 
+ void NCCLSymmetricMemoryContext::finalize() const {
+-    // Deregister window and free buffer
+-    NCCL_CHECK(ncclCommWindowDeregister(comm, window));
++    // Deregister all windows (each against its owning comm) and free the single
++    // physical buffer once. `windows[0]`/`comms[0]` are the stock window/comm, so
++    // with `EP_NUM_COMMS<=1` this is the same single deregister as stock.
++    for (size_t k = 0; k < windows.size(); ++ k)
++        NCCL_CHECK(ncclCommWindowDeregister(comms[k], windows[k]));
+     NCCL_CHECK(ncclMemFree(raw_window_ptr));
+ 
+-    // Destroy device communicator
+-    NCCL_CHECK(ncclDevCommDestroy(comm, &dev_comm));
++    // Destroy all device communicators (each against its owning comm).
++    // NOTES: `ncclDevCommDestroy` takes `ncclDevComm_t const*`, so passing the
++    // address of a const-method member is fine (matches the stock single-comm call).
++    for (size_t k = 0; k < dev_comms.size(); ++ k)
++        NCCL_CHECK(ncclDevCommDestroy(comms[k], &dev_comms[k]));
+ }
+ 
+ }  // namespace deep_ep::nccl
+diff --git a/csrc/kernels/elastic/combine.hpp b/csrc/kernels/elastic/combine.hpp
+index 3764da9..b00cef8 100644
+--- a/csrc/kernels/elastic/combine.hpp
++++ b/csrc/kernels/elastic/combine.hpp
+@@ -2,6 +2,7 @@
+ 
+ #include <nccl.h>
+ 
++#include <deep_ep/common/gin_dev_comm_array.cuh>  // G2c: deep_ep::GinDevCommArray (minimal, no handle.cuh)
+ #include <deep_ep/common/compiled.cuh>
+ #include <deep_ep/common/exception.cuh>
+ 
+@@ -32,8 +33,7 @@ public:
+         int* psum_num_recv_tokens_per_scaleup_rank;
+         int* token_metadata_at_forward;
+         int* channel_linked_list;
+-        ncclDevComm_t nccl_dev_comm;
+-        ncclWindow_t nccl_window;
++        GinDevCommArray gin_comms;  // G2c: K dev_comms/windows striped by SM
+         void* buffer;
+         void* workspace;
+         int scaleout_rank_idx, scaleup_rank_idx;
+@@ -87,7 +87,7 @@ static void __instantiate_kernel() {{
+             EP_CUDA_UNIFIED_CHECK(jit::launch_kernel(kernel, config,
+                                                      args.x, args.topk_weights,
+                                                      args.src_metadata, args.psum_num_recv_tokens_per_scaleup_rank,
+-                                                     args.nccl_dev_comm, args.nccl_window,
++                                                     args.gin_comms,
+                                                      args.buffer, args.workspace,
+                                                      args.scaleup_rank_idx,
+                                                      args.num_reduced_tokens));
+@@ -98,7 +98,7 @@ static void __instantiate_kernel() {{
+                                                      args.psum_num_recv_tokens_per_scaleup_rank,
+                                                      args.token_metadata_at_forward,
+                                                      args.channel_linked_list,
+-                                                     args.nccl_dev_comm, args.nccl_window,
++                                                     args.gin_comms,
+                                                      args.buffer, args.workspace,
+                                                      args.scaleout_rank_idx, args.scaleup_rank_idx,
+                                                      args.num_reduced_tokens));
+@@ -117,7 +117,7 @@ static void* launch_combine(void* x,
+                             int* psum_num_recv_tokens_per_scaleup_rank,
+                             int* token_metadata_at_forward,
+                             int* channel_linked_list,
+-                            const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
++                            const GinDevCommArray& gin_comms,
+                             void* buffer, void* workspace,
+                             const int& num_reduced_tokens, const int& num_max_tokens_per_rank,
+                             const int& hidden,
+@@ -166,7 +166,7 @@ static void* launch_combine(void* x,
+         .psum_num_recv_tokens_per_scaleup_rank = psum_num_recv_tokens_per_scaleup_rank,
+         .token_metadata_at_forward = token_metadata_at_forward,
+         .channel_linked_list = channel_linked_list,
+-        .nccl_dev_comm = nccl_dev_comm, .nccl_window = nccl_window,
++        .gin_comms = gin_comms,
+         .buffer = buffer, .workspace = workspace,
+         .scaleout_rank_idx = scaleout_rank_idx, .scaleup_rank_idx = scaleup_rank_idx,
+         .num_reduced_tokens = num_reduced_tokens,
+diff --git a/csrc/kernels/elastic/dispatch.hpp b/csrc/kernels/elastic/dispatch.hpp
+index ddac5db..2dfc338 100644
+--- a/csrc/kernels/elastic/dispatch.hpp
++++ b/csrc/kernels/elastic/dispatch.hpp
+@@ -3,6 +3,7 @@
+ #include <nccl.h>
+ #include <nccl_device.h>
+ 
++#include <deep_ep/common/gin_dev_comm_array.cuh>  // G2c: deep_ep::GinDevCommArray (minimal, no handle.cuh)
+ #include <deep_ep/common/compiled.cuh>
+ #include <deep_ep/common/exception.cuh>
+ 
+@@ -114,8 +115,7 @@ public:
+         int* token_metadata_at_forward;
+         int num_tokens;
+         int sf_token_stride, sf_hidden_stride;
+-        ncclDevComm_t nccl_dev_comm;
+-        ncclWindow_t nccl_window;
++        GinDevCommArray gin_comms;  // G2c: K dev_comms/windows striped by SM
+         void* buffer;
+         void* workspace; void* mapped_host_workspace;
+         int scaleout_rank_idx, scaleup_rank_idx;
+@@ -175,7 +175,7 @@ static void __instantiate_kernel() {{
+                 args.dst_buffer_slot_idx,
+                 args.num_tokens,
+                 args.sf_token_stride, args.sf_hidden_stride,
+-                args.nccl_dev_comm, args.nccl_window,
++                args.gin_comms,
+                 args.buffer,
+                 args.workspace, args.mapped_host_workspace,
+                 args.scaleup_rank_idx));
+@@ -191,7 +191,7 @@ static void __instantiate_kernel() {{
+                 args.token_metadata_at_forward,
+                 args.num_tokens,
+                 args.sf_token_stride, args.sf_hidden_stride,
+-                args.nccl_dev_comm, args.nccl_window,
++                args.gin_comms,
+                 args.buffer,
+                 args.workspace, args.mapped_host_workspace,
+                 args.scaleout_rank_idx, args.scaleup_rank_idx
+@@ -223,7 +223,7 @@ static void launch_dispatch(void* x, void* sf,
+                             const int& hidden, const int& elem_size,
+                             const int& num_sf_packs, const int& sf_token_stride, const int& sf_hidden_stride,
+                             const int& num_experts, const int& num_topk, const int& expert_alignment,
+-                            const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
++                            const GinDevCommArray& gin_comms,
+                             void* buffer,
+                             void* workspace, void* mapped_host_workspace,
+                             const int& scaleout_rank_idx, const int& scaleup_rank_idx,
+@@ -295,7 +295,7 @@ static void launch_dispatch(void* x, void* sf,
+         .token_metadata_at_forward = token_metadata_at_forward,
+         .num_tokens = num_tokens,
+         .sf_token_stride = sf_token_stride, .sf_hidden_stride = sf_hidden_stride,
+-        .nccl_dev_comm = nccl_dev_comm, .nccl_window = nccl_window,
++        .gin_comms = gin_comms,
+         .buffer = buffer,
+         .workspace = workspace, .mapped_host_workspace = mapped_host_workspace,
+         .scaleout_rank_idx = scaleout_rank_idx, .scaleup_rank_idx = scaleup_rank_idx,
+diff --git a/deep_ep/buffers/elastic.py b/deep_ep/buffers/elastic.py
+index a6211b7..12eb8f9 100644
+--- a/deep_ep/buffers/elastic.py
++++ b/deep_ep/buffers/elastic.py
+@@ -234,6 +234,13 @@ class ElasticBuffer:
+ 
+         # Create CPP handle
+         self.explicitly_destroy = explicitly_destroy
++        # G2c-bridge: EP_NUM_COMMS>1 mints K independent comms (G2a); pass the K-1 EXTRA
++        # handles to the C++ ctor so NCCLSymmetricMemoryContext (G2b) builds K dev_comms +
++        # K windows over the one buffer. EP_NUM_COMMS unset/1 => handles[1:] is empty =>
++        # extra_nccl_comms=[] => byte-identical stock (single comm/window).
++        from ..utils.comm import get_nccl_comm_handles
++        _ep_comm_handles = get_nccl_comm_handles(group)
++        _extra_nccl_comms = [h.get() for h in _ep_comm_handles[1:]]
+         self.runtime = _C.ElasticBuffer(group.rank(), group.size(),
+                                         self.nccl_comm_handle.get(),
+                                         num_bytes,
+@@ -243,7 +250,8 @@ class ElasticBuffer:
+                                         prefer_overlap_with_compute,
+                                         sl_idx, num_allocated_qps,
+                                         num_cpu_timeout_secs, num_gpu_timeout_secs,
+-                                        self.explicitly_destroy)
++                                        self.explicitly_destroy,
++                                        _extra_nccl_comms)
+ 
+         # Logical rank indices
+         self.num_scaleout_ranks, self.num_scaleup_ranks = self.get_logical_domain_size()
+diff --git a/deep_ep/include/deep_ep/common/comm.cuh b/deep_ep/include/deep_ep/common/comm.cuh
+index 04a77d4..ed05a8b 100644
+--- a/deep_ep/include/deep_ep/common/comm.cuh
++++ b/deep_ep/include/deep_ep/common/comm.cuh
+@@ -7,6 +7,9 @@
+ #include <deep_ep/common/handle.cuh>
+ #include <deep_ep/common/ptx.cuh>
+ #include <deep_ep/common/layout.cuh>
++// G2c: GinDevCommArray + kMaxNumComms moved to a minimal standalone header so api.cuh /
++// nccl.cu (host TU) can include it WITHOUT pulling handle.cuh's device-only ncclGin*.
++#include <deep_ep/common/gin_dev_comm_array.cuh>
+ 
+ namespace deep_ep::elastic::comm {
+ 
+diff --git a/deep_ep/include/deep_ep/impls/combine.cuh b/deep_ep/include/deep_ep/impls/combine.cuh
+index 79f3931..59e2c51 100644
+--- a/deep_ep/include/deep_ep/impls/combine.cuh
++++ b/deep_ep/include/deep_ep/impls/combine.cuh
+@@ -29,7 +29,8 @@ __global__ void __launch_bounds__(kNumThreads, 1)
+ combine_impl(nv_bfloat16* x,
+              float* topk_weights,
+              int* src_metadata, int* psum_num_recv_tokens_per_scaleup_rank,
+-             const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window,
++             // G2c: K dev_comms/windows by value; the gin handle below picks `comms[sm_idx % num_comms]`.
++             const GinDevCommArray gin_comms,
+              void* buffer, void* workspace,
+              const int rank_idx,
+              int num_reduced_tokens) {
+@@ -71,10 +72,16 @@ combine_impl(nv_bfloat16* x,
+     // Gin handle
+     // We treat each warp as a "channel"
+     const auto [qp_idx, sharing_mode] = comm::get_qp_mode<kNumSMs, kNumQPs, kNumWarps>(sm_idx, warp_idx);
+-    const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, sharing_mode);
++    // G2d: this (single-scale-out-rank) kernel has NO scale-out (ncclTeamTagRail) traffic —
++    // all GIN ops use `team_t` (world/scale-up). Per the per-dst design those ride ONE comm,
++    // so pin the gin to comm 0. With `num_comms == 1` comm 0 == the stock dev_comm/window
++    // => byte-identical to stock.
++    const auto gin = handle::NCCLGin(gin_comms.comms[0], gin_comms.windows[0], qp_idx, sharing_mode);
+ 
+     // Full barrier to ensure the remote buffer is available
+     const auto workspace_layout = layout::WorkspaceLayout(workspace, 1, kNumRanks, kNumExperts);
++    // G2d-fix (god-mode 2-lineage): SINGLE barrier on comm 0 — K comms alias one buffer => shared
++    // barrier signal slots; a K-loop collapses the barrier. One barrier = sufficient rendezvous.
+     comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kCombineTag0, false, false, true>(
+         gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+@@ -231,6 +238,7 @@ combine_impl(nv_bfloat16* x,
+     }
+ 
+     // Final barrier to ensure data arrival
++    // G2d-fix (god-mode 2-lineage): SINGLE barrier on comm 0 (aliased signal slots — see Tag0 note).
+     comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kCombineTag1, true, true, false>(
+         gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+diff --git a/deep_ep/include/deep_ep/impls/dispatch.cuh b/deep_ep/include/deep_ep/impls/dispatch.cuh
+index cf21a18..919ab00 100644
+--- a/deep_ep/include/deep_ep/impls/dispatch.cuh
++++ b/deep_ep/include/deep_ep/impls/dispatch.cuh
+@@ -38,7 +38,8 @@ dispatch_impl(
+     int* dst_buffer_slot_idx,
+     const int num_tokens,
+     const int sf_token_stride, const int sf_hidden_stride,
+-    const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window, void* buffer,
++    // G2c: K dev_comms/windows by value; the gin handle below picks `comms[sm_idx % num_comms]`.
++    const GinDevCommArray gin_comms, void* buffer,
+     void* workspace, void* mapped_host_workspace,
+     const int rank_idx
+ ) {
+@@ -67,9 +68,16 @@ dispatch_impl(
+     // We treat each warp as a "channel"
+     const auto [qp_idx, sharing_mode] = comm::get_qp_mode<kNumSMs, kNumQPs, kNumDispatchWarps, (kNumNotifyWarps > 0)>(
+         sm_idx, warp_idx - kNumNotifyWarps, warp_idx < kNumNotifyWarps);
+-    const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, sharing_mode);
++    // G2d: this (single-scale-out-rank) kernel has NO scale-out (ncclTeamTagRail) traffic —
++    // all GIN ops use `team_t` (world/scale-up). Per the per-dst design those ride ONE comm,
++    // so pin the gin to comm 0 (splitting a destination's world conversation across comms by
++    // SM would corrupt its count, same class as the hybrid bug). With `num_comms == 1`
++    // comm 0 == the stock dev_comm/window => byte-identical to stock.
++    const auto gin = handle::NCCLGin(gin_comms.comms[0], gin_comms.windows[0], qp_idx, sharing_mode);
+ 
+     // Barrier without TMA store flush, without prologue grid sync
++    // G2d-fix (god-mode 2-lineage): SINGLE barrier on comm 0 — K comms alias one buffer => shared
++    // barrier signal slots; a K-loop collapses the barrier. One barrier = sufficient rendezvous.
+     comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag0, false, false, true>(
+         gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+@@ -389,6 +397,7 @@ dispatch_impl(
+     }
+ 
+     // Barrier to ensure data arrival
++    // G2d-fix (god-mode 2-lineage): SINGLE barrier on comm 0 (aliased signal slots — see Tag0 note).
+     comm::gpu_barrier<kIsScaleupNVLink, 1, kNumRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kDispatchTag1, true, true, false>(
+         gin, workspace_layout, 0, rank_idx, sm_idx, thread_idx);
+diff --git a/deep_ep/include/deep_ep/impls/hybrid_combine.cuh b/deep_ep/include/deep_ep/impls/hybrid_combine.cuh
+index 018f22b..ffb9672 100644
+--- a/deep_ep/include/deep_ep/impls/hybrid_combine.cuh
++++ b/deep_ep/include/deep_ep/impls/hybrid_combine.cuh
+@@ -36,7 +36,8 @@ hybrid_combine_impl(nv_bfloat16* x,
+                     int* psum_num_recv_tokens_per_scaleup_rank,
+                     int* token_metadata_at_forward,
+                     int* channel_linked_list,
+-                    const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window,
++                    // G2c: K dev_comms/windows by value; the gin handle below picks `comms[sm_idx % num_comms]`.
++                    const GinDevCommArray gin_comms,
+                     void* buffer, void* workspace,
+                     const int scaleout_rank_idx, const int scaleup_rank_idx,
+                     int num_reduced_tokens) {
+@@ -88,10 +89,37 @@ hybrid_combine_impl(nv_bfloat16* x,
+     // Each warp is a channel
+     const auto [qp_idx, sharing_mode] =
+         comm::get_qp_mode<kNumSMs, kNumQPs, kNumChannelsPerSM>(sm_idx, warp_idx % kNumChannelsPerSM);
+-    const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, sharing_mode);
++    // G2d: PRIMARY gin pinned to comm 0 for scale-up (NVLink, ncclTeamTagLsa) ops + local
++    // address translation. Scale-out (ncclTeamTagRail) ops are routed per-destination via
++    // `scaleout_gin` so a destination's whole conversation rides ONE comm. With
++    // `num_comms == 1` comm 0 == the stock dev_comm/window => byte-identical to stock.
++    const auto gin = handle::NCCLGin(gin_comms.comms[0], gin_comms.windows[0], qp_idx, sharing_mode);
++
++    // G2d: per-destination comm selector for scale-out (ncclTeamTagRail) ops. Keeps `qp_idx`
++    // (globally unique per SM) so concurrent SMs on a shared comm use distinct QP send-rings.
++    const auto scaleout_gin = [&](const int& dst) -> handle::NCCLGin {
++        const int dc = dst % gin_comms.num_comms;
++        return handle::NCCLGin(gin_comms.comms[dc], gin_comms.windows[0], qp_idx, sharing_mode);  // G2d-fix: stripe dev_comm (progress) but window[0] for consistent symmetric VA (per-comm windows map at different lsaFlatBase)
++    };
++
++    // G2e: per-CHANNEL comm selector — mirrors the dispatch kernel. The combine signaled_tail is
++    // ALREADY per-(channel_idx, dst_rank) (get_scaleout_channel_signaled_tail_ptr), so each
++    // (channel,dst) is an independent ordering domain. Routing the scale-out token DATA put AND its
++    // per-channel tail on the SAME comm = (channel_idx+dst)%K keeps release-before-data ordering per
++    // channel (EFA SRD has no cross-QP ordering) while a single dst's kNumChannels channels fan
++    // across all K comms => K QPs/peer (beyond the per-dst K_eff=num_scaleout_ranks cap). Q2-correct
++    // by construction. `num_comms == 1` => comms[0] => byte-identical to stock.
++    const auto scaleout_gin_ch = [&](const int& channel, const int& dst) -> handle::NCCLGin {
++        const int dc = (channel + dst) % gin_comms.num_comms;
++        return handle::NCCLGin(gin_comms.comms[dc], gin_comms.windows[0], qp_idx, sharing_mode);
++    };
+ 
+     // Global parallel barriers for scale-out subteam and scale-up subteam
+     // NOTES: this barrier needs a grid sync, as there are channel scale-up tail cleaning before
++    // G2d-fix (god-mode 2-lineage): SINGLE barrier on comm 0. K comms alias one physical symmetric
++    // buffer => shared barrier signal slots; the K-loop collapses the barrier (comm k clobbers
++    // comm 0's flags) => count read/clear race. One barrier = sufficient rank rendezvous; per-comm
++    // red_add_rel release tails signal data arrival, receiver-polled, independent of the barrier.
+     comm::gpu_barrier<true, kNumScaleoutRanks, kNumScaleupRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kHybridCombineTag0, false, true, true>(
+         gin, workspace_layout, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx);
+@@ -368,7 +396,9 @@ hybrid_combine_impl(nv_bfloat16* x,
+ 
+                 // Issue only if not local rank
+                 if (last_src_scaleout_rank_idx != scaleout_rank_idx) {
+-                    gin.put<ncclTeamTagRail>(
++                    // G2e: route the token payload on the per-(channel,dst) comm (same comm as this
++                    // channel's tail) so a single dst's channels fan across all K comms.
++                    scaleout_gin_ch(channel_idx, last_src_scaleout_rank_idx).template put<ncclTeamTagRail>(
+                         last_recv_token_buffer_ptr,
+                         last_send_token_buffer_ptr,
+                         token_layout.get_num_bytes<false>(),
+@@ -475,7 +505,8 @@ hybrid_combine_impl(nv_bfloat16* x,
+                         // Issue IBGDA
+                         topk_valid_mask ^= 1u << k;
+                         if (src_scaleout_rank_idx != scaleout_rank_idx) {
+-                            gin.put<ncclTeamTagRail>(
++                            // G2e: route the token payload on the per-(channel,dst) comm.
++                            scaleout_gin_ch(channel_idx, src_scaleout_rank_idx).template put<ncclTeamTagRail>(
+                                 recv_buffer_ptr,
+                                 send_buffer_ptr,
+                                 token_layout.get_num_bytes<false>(),
+@@ -583,7 +614,9 @@ hybrid_combine_impl(nv_bfloat16* x,
+         if (lane_idx < kNumScaleoutRanks) {
+             // Update remote tails
+             const auto expected_signal = math::pack2<int, int64_t>(1, 0);
+-            gin.red_add_rel<ncclTeamTagRail>(
++            // G2e: route the per-(channel,dst) tail on the SAME (channel+dst)%K comm as this
++            // channel's token writes above (release-before-data ordering per channel). `lane_idx`=dst.
++            scaleout_gin_ch(channel_idx, lane_idx).template red_add_rel<ncclTeamTagRail>(
+                 workspace_layout.get_scaleout_channel_signaled_tail_ptr(channel_idx, scaleout_rank_idx),
+                 expected_signal, lane_idx);
+ 
+diff --git a/deep_ep/include/deep_ep/impls/hybrid_dispatch.cuh b/deep_ep/include/deep_ep/impls/hybrid_dispatch.cuh
+index 1a06952..f74cef7 100644
+--- a/deep_ep/include/deep_ep/impls/hybrid_dispatch.cuh
++++ b/deep_ep/include/deep_ep/impls/hybrid_dispatch.cuh
+@@ -42,7 +42,8 @@ hybrid_dispatch_impl(
+     const int num_tokens,
+     const int sf_token_stride, const int sf_hidden_stride,
+     // TODO(NCCL): so many params, plans to optimize?
+-    const ncclDevComm_t nccl_dev_comm, const ncclWindow_t nccl_window,
++    // G2c: K dev_comms/windows by value; the gin handle below picks `comms[sm_idx % num_comms]`.
++    const GinDevCommArray gin_comms,
+     void* buffer,
+     void* workspace, void* mapped_host_workspace,
+     const int scaleout_rank_idx, const int scaleup_rank_idx) {
+@@ -75,9 +76,40 @@ hybrid_dispatch_impl(
+     // Each warp is a channel
+     const auto [qp_idx, sharing_mode] = comm::get_qp_mode<kNumSMs, kNumQPs, kNumChannelsPerSM, (kNumNotifyWarps > 0)>(
+         sm_idx, (warp_idx - kNumNotifyWarps) % kNumChannelsPerSM, warp_idx < kNumNotifyWarps);
+-    const auto gin = handle::NCCLGin(nccl_dev_comm, nccl_window, qp_idx, sharing_mode);
+-
+-    // Global parallel barriers for scale-out subteam and scale-up subteam
++    // G2d: PRIMARY gin pinned to comm 0. Used for scale-up (NVLink, ncclTeamTagLsa) ops,
++    // local address translation, and the workspace handle. Scale-out (ncclTeamTagRail)
++    // ops are routed per-destination via `scaleout_gin` below so a destination's whole
++    // token+count+tail conversation rides ONE comm (fixes the EP_NUM_COMMS=2 count split).
++    // With `num_comms == 1` comm 0 == the stock dev_comm/window => byte-identical to stock.
++    const auto gin = handle::NCCLGin(gin_comms.comms[0], gin_comms.windows[0], qp_idx, sharing_mode);
++
++    // G2d: per-destination comm selector for scale-out (ncclTeamTagRail) ops. Keeps `qp_idx`
++    // (globally unique per SM) so concurrent SMs on a shared comm use distinct QP send-rings.
++    const auto scaleout_gin = [&](const int& dst) -> handle::NCCLGin {
++        const int dc = dst % gin_comms.num_comms;
++        return handle::NCCLGin(gin_comms.comms[dc], gin_comms.windows[0], qp_idx, sharing_mode);  // G2d-fix: stripe dev_comm (progress) but window[0] for consistent symmetric VA (per-comm windows map at different lsaFlatBase)
++    };
++
++    // G2e: per-CHANNEL comm selector for the bandwidth-dominant scale-out token DATA put + its
++    // per-(channel,dst) signaled_tail. `signaled_tail` is ALREADY keyed per-(channel_idx, dst_rank)
++    // (get_scaleout_channel_signaled_tail_ptr), so each (channel,dst) is an independent ordering
++    // domain. Routing the data put AND its tail on the SAME comm = (channel_idx+dst)%K keeps the
++    // release-before-data ordering intact PER CHANNEL (EFA SRD has no cross-QP ordering) while a
++    // single destination's kNumChannels channels fan across all K comms => K progress threads /
++    // QPs drive the same peer (beyond the dst%K cap = num_scaleout_ranks). Q2-correct by construction
++    // (no new tails, no receiver change). `num_comms == 1` => comms[0] => byte-identical to stock.
++    const auto scaleout_gin_ch = [&](const int& channel, const int& dst) -> handle::NCCLGin {
++        const int dc = (channel + dst) % gin_comms.num_comms;
++        return handle::NCCLGin(gin_comms.comms[dc], gin_comms.windows[0], qp_idx, sharing_mode);
++    };
++
++    // Global parallel barriers for scale-out subteam and scale-up subteam.
++    // G2d-fix (god-mode 2-lineage): a SINGLE barrier on comm 0. All K comms alias ONE physical
++    // symmetric buffer => they share the barrier's GIN signal slots; looping the barrier over K
++    // comms makes comm k clobber comm 0's just-set sync flags => premature barrier collapse =>
++    // the receiver's read-and-clear races the sender => negative counts. One barrier (grid.sync +
++    // signal on comm 0) is a sufficient rank rendezvous; scale-out data arrival is signaled
++    // separately by each comm's own red_add_rel release tail (receiver-polled), not the barrier.
+     comm::gpu_barrier<true, kNumScaleoutRanks, kNumScaleupRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kHybridDispatchTag0, false, false, true>(
+         gin, workspace_layout, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx);
+@@ -175,12 +207,14 @@ hybrid_dispatch_impl(
+                              "kNumScaleoutRanks must be less than kNumNotifyThreads");
+             if (thread_idx < kNumScaleoutRanks) {
+                 const auto dst_scaleout_rank_idx = thread_idx;
+-                gin.put<ncclTeamTagRail>(
++                // G2d: route the per-destination count writes on the destination's comm.
++                const auto dst_gin = scaleout_gin(dst_scaleout_rank_idx);
++                dst_gin.template put<ncclTeamTagRail>(
+                     workspace_layout.get_scaleout_rank_count_ptr<false>(scaleout_rank_idx),
+                     workspace_layout.get_scaleout_rank_count_ptr<true>(dst_scaleout_rank_idx),
+                     kNumScaleupRanks * sizeof(int), dst_scaleout_rank_idx,
+                     ncclGinOptFlagsAggregateRequests);
+-                gin.put<ncclTeamTagRail>(
++                dst_gin.template put<ncclTeamTagRail>(
+                     workspace_layout.get_scaleout_expert_count_ptr<false>(scaleout_rank_idx),
+                     workspace_layout.get_scaleout_expert_count_ptr<true>(dst_scaleout_rank_idx),
+                     kNumExpertsPerScaleout * sizeof(int), dst_scaleout_rank_idx);
+@@ -339,7 +373,10 @@ hybrid_dispatch_impl(
+ 
+                 // NOTES: the "release" scope will be `sys` for the local rank (we may involve NVLink so not `gpu`)
+                 // For RDMA requests, "release" is ensured by "atomic"
+-                gin.red_add_rel<ncclTeamTagRail>(ptr, signaled_tail - old_signaled_tail, lane_idx);
++                // G2e: route the per-(channel,dst) tail signal on the SAME (channel+dst)%K comm as
++                // this channel's token data put below, so release-before-data ordering holds per
++                // channel (EFA SRD has no cross-QP ordering). `lane_idx` IS the destination here.
++                scaleout_gin_ch(channel_idx, lane_idx).template red_add_rel<ncclTeamTagRail>(ptr, signaled_tail - old_signaled_tail, lane_idx);
+                 stored_old_scaleout_tail = stored_scaleout_tail;
+             }
+             __syncwarp();
+@@ -441,7 +478,10 @@ hybrid_dispatch_impl(
+ 
+             // Issue IBGDA requests
+             if (stored_dst_slot_idx >= 0 and stored_dst_scaleout_rank_idx != scaleout_rank_idx) {
+-                gin.put<ncclTeamTagRail>(
++                // G2e: route the token payload on the per-(channel,dst) comm (same comm as this
++                // channel's tail above) so a single destination's kNumChannels channels fan across
++                // all K comms => K QPs drive the same peer (beyond the dst%K = num_scaleout_ranks cap).
++                scaleout_gin_ch(channel_idx, stored_dst_scaleout_rank_idx).template put<ncclTeamTagRail>(
+                         scaleout_recv_buffer.get_token_buffer(stored_dst_slot_idx).get_base_ptr(),
+                         scaleout_send_buffer.get_token_buffer(token_idx).get_base_ptr(),
+                         tma_buffer.get_num_bytes<false>(),
+@@ -655,6 +695,7 @@ hybrid_dispatch_impl(
+ 
+     // Scale-up barrier to ensure data arrival
+     // As scale-out tokens have already been consumed by forwarders, no need to do scale-out barrier again
++    // G2d-fix (god-mode 2-lineage): SINGLE barrier on comm 0 (aliased signal slots — see Tag0 note).
+     comm::gpu_barrier<true, kNumScaleoutRanks, kNumScaleupRanks,
+                       kNumSMs, kNumThreads, kNumQPs, kNumTimeoutCycles, comm::kHybridDispatchTag1, true, true, false>(
+         gin, workspace_layout, scaleout_rank_idx, scaleup_rank_idx, sm_idx, thread_idx, /* do not scale-out */ false, true);
+diff --git a/deep_ep/utils/comm.py b/deep_ep/utils/comm.py
+index 6cec159..5923481 100644
+--- a/deep_ep/utils/comm.py
++++ b/deep_ep/utils/comm.py
+@@ -71,6 +71,44 @@ def get_nccl_comm_handle(group: dist.ProcessGroup) -> NCCLCommHandle:
+     return _storage[group]
+ 
+ 
++def get_nccl_comm_handles(group: dist.ProcessGroup) -> list:
++    """
++    Get or create `EP_NUM_COMMS` independent NCCL communicator handles for the given process group.
++
++    Each handle wraps an independent `ncclCommInitRank` communicator (its own `sharedRes`, hence its
++    own GIN progress thread). Striping DeepEP traffic across K handles yields K progress threads. The
++    list is cached separately from `get_nccl_comm_handle`'s single-handle cache.
++
++    `EP_NUM_COMMS` unset or `1` returns exactly `[get_nccl_comm_handle(group)]` (the stock single
++    handle), so the single-comm path is byte-identical to stock.
++
++    Arguments:
++        group: the communication group.
++
++    Returns:
++        handles: a list of `EP_NUM_COMMS` NCCL communicator handles (index 0 is the stock handle).
++    """
++    global _storage
++    cache_key = (group, 'handles')
++    if cache_key in _storage:
++        return _storage[cache_key]
++
++    # Handle 0 is always the stock single handle (preserves the single-comm path exactly).
++    handles = [get_nccl_comm_handle(group)]
++
++    num_comms = int(os.getenv('EP_NUM_COMMS', '1'))
++    for _ in range(num_comms - 1):
++        # Each extra comm needs its own unique ID broadcast from the group root.
++        nccl_unique_ids = [None, ] * group.size()
++        dist.all_gather_object(nccl_unique_ids, _C.get_local_nccl_unique_id(), group)
++        root_unique_id = nccl_unique_ids[0]
++        handles.append(NCCLCommHandle(
++            _C.create_nccl_comm(root_unique_id, group.size(), group.rank()), True))
++
++    _storage[cache_key] = handles
++    return handles
++
++
+ def destroy_all_managed_nccl_comm() -> None:
+     """
+     Destroy all cached NCCL communicator handles and clear the cache.

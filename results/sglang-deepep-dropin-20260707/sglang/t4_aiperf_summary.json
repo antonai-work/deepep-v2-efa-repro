@@ -1,0 +1,46 @@
+{
+  "framework": "SGLang (PUBLIC sglang==0.5.11 PyPI wheel + DeepEP-V2 seam patch [SGLang PR #24443 lineage \u2014 the named GAP artifact])",
+  "date_utc": "2026-07-07T02:2xZ",
+  "arm": "deepep-sglang (SGLANG_DEEPEP_USE_V2=1 -> ElasticBuffer; EP_NUM_COMMS=8)",
+  "topology": "2x p5en.48xlarge H200, TP16/EP16/DP16 dp-attention, model Qwen/Qwen3-30B-A3B-FP8",
+  "transport": "DeepEP V2 ElasticBuffer over NCCL-GIN v2 CPU-proxy (NCCL_GIN_TYPE=2, OFI_NCCL_GIN_GDAKI=0), aws-ofi-nccl 9c44 v1-fallback plugin (gdrdrv-2.4 kernel nodes)",
+  "buffer_fix": "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024 (default 128 trips buffer.hpp:686 num_tokens<=num_max_tokens_per_rank on conc32 prefill bursts; sglang caps the knob at 1024)",
+  "backend_proof": "constructing deep_ep.ElasticBuffer x16 ranks in-log; health 200; coherent completion",
+  "aiperf": {
+    "version": "0.10.0",
+    "shape": "ISL120/OSL128, ignore_eos, streaming, completions",
+    "cells": [
+      {
+        "cell": "c4",
+        "concurrency": 4,
+        "requests": 40,
+        "errors": 0,
+        "agg_tps": 34.53,
+        "per_user_tps": 8.81,
+        "ttft_p50_ms": 350.3,
+        "ttft_p99_ms": 550.9
+      },
+      {
+        "cell": "c8",
+        "concurrency": 8,
+        "requests": 64,
+        "errors": 0,
+        "agg_tps": 67.25,
+        "per_user_tps": 8.57,
+        "ttft_p50_ms": 365.1,
+        "ttft_p99_ms": 545.7
+      },
+      {
+        "cell": "c32",
+        "concurrency": 32,
+        "requests": 128,
+        "errors": 0,
+        "agg_tps": 255.16,
+        "per_user_tps": 8.25,
+        "ttft_p50_ms": 543.4,
+        "ttft_p99_ms": 1077.6
+      }
+    ]
+  },
+  "baseline_note": "campaign 2026-06-20 SGLang conc32 baseline ~253 agg tok/s -> this run 255.16 (=1.01x, within noise). SGLang remains ~1.76x vLLM at c32 on this shape (255 vs 145)."
+}

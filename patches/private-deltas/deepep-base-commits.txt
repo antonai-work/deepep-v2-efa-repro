@@ -1,0 +1,4 @@
+146cc35 aws-efa: raise dispatch kScaleoutUpdateInterval from 3 to 16
+62a38bf aws-efa: add EFA fast path in get_rdma_gbs to fix SM auto-sizing
+164c82d aws-efa: cap auto-QP at 2 on EFA to avoid 128-slot GIN ring overflow
+b306af0 [Public release 26/04] Introducing EPv2: faster EP, and Engram/PP/CP supports (#605)

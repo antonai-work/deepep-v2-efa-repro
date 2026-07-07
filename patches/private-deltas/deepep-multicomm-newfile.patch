@@ -1,0 +1,39 @@
+diff --git a/deep_ep/include/deep_ep/common/gin_dev_comm_array.cuh b/deep_ep/include/deep_ep/common/gin_dev_comm_array.cuh
+new file mode 100644
+index 0000000..52d7006
+--- /dev/null
++++ b/deep_ep/include/deep_ep/common/gin_dev_comm_array.cuh
+@@ -0,0 +1,33 @@
++#pragma once
++
++// G2c: minimal standalone header for the K-comm bundle. Depends ONLY on <nccl_device.h>
++// (for ncclDevComm_t / ncclWindow_t) so it can be included by the HOST-side api.cuh /
++// nccl.cu TU WITHOUT dragging in the device-only ncclGin* symbols from handle.cuh
++// (which are unavailable in the host compile context and caused 'ncclGin not declared').
++#include <nccl_device.h>
++
++namespace deep_ep {
++
++// Maximum number of independent NCCL comms striped over by `EP_NUM_COMMS`.
++// G3: K<=16 — the by-value kernel-arg bundle is 16 * sizeof(ncclDevComm=200B) + 16 *
++// sizeof(ncclWindow_t=8B) + 4 ~= 3.3 KB. The CUDA-driver per-launch param area is 4 KB
++// (sm_70+), and this bundle is ONE of several kernel args, so K=16 is the practical ceiling
++// without moving the bundle to __constant__ / device staging. K=8 prefill = 33 GB/s SO (4.3x
++// stock); K=16 probes the prefill knee toward UCCL-standalone's 60.75. NOTE: this header is
++// included by the HOST TU (api.cuh/nccl.cu) so changing this requires a host _C.so rebuild (cu13).
++static constexpr int kMaxNumComms = 16;
++
++// A by-value bundle of the K device communicators + windows, passed as a SINGLE kernel
++// argument (a POD struct does not decay, so `&arg` is valid for `cuLaunchKernelEx`, and
++// no device staging / cudaMemcpy is needed). All K windows alias one physical buffer
++// (shape b-ii), so symmetric offsets + the receiver/counter layout are identical across
++// comms; the dispatch/combine kernel just selects `comms[sm_idx % num_comms]` per SM to
++// fan the GIN traffic across the K independent NCCL progress threads. With `num_comms == 1`
++// only slot 0 (== the stock dev_comm/window) is ever used => byte-identical to stock.
++struct GinDevCommArray {
++    ncclDevComm_t comms[kMaxNumComms];
++    ncclWindow_t windows[kMaxNumComms];
++    int num_comms;
++};
++
++}  // namespace deep_ep

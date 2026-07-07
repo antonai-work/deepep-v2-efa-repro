@@ -1,0 +1,115 @@
+# =============================================================================
+# campaign-fw-bench — AS-RUN NGC-from-scratch 2-pod EP16 (the CORRECTED spec).
+#
+# HARD RULE: image is the official NVIDIA NGC base (nvcr.io/nvidia/cuda:12.9.0-devel-
+# ubuntu24.04) — NOT any image we created. Pods idle; the TRT stack is built in-pod
+# (substrate 00pre-substrate-from-ngc.sh -> 00-bringup-all-consolidated.sh).
+#
+# LOAD-BEARING (EXP-E2E-NGC-FROM-SCRATCH bug #9): the container MUST be
+#   securityContext.privileged: true  AND  volumeMount /dev (hostPath /dev)
+# or gdr_open(/dev/gdrdrv) returns EPERM -> GIN plugin "Failed to open gdr handle"
+# -> props.ginType==NONE -> ElasticBuffer assert. A non-privileged pod silently
+# fails the CPU-proxy NCCL-GIN path even though the build imports fine.
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  annotations: {}
+  labels:
+    app: campaign-fw-bench
+  name: campaign-fw-bench
+  namespace: iankouls
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: Parallel
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: campaign-fw-bench
+  serviceName: deepep-efa-bench
+  template:
+    metadata:
+      labels:
+        app: campaign-fw-bench
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - campaign-fw-bench
+                - stage4b-ep64
+                - stage4b-ep32
+                - stage4b-v18
+                - stage4b-fsx
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - args:
+        - 'set -e
+
+          if [ ! -c /dev/gdrdrv ]; then mknod /dev/gdrdrv c 237 0 || true; chmod 666
+          /dev/gdrdrv || true; fi
+
+          mkdir -p /data/hf-cache
+
+          echo ''NGC cuda-12.9 base pod ready (build in-pod from public source)''
+
+          sleep infinity
+
+          '
+        command:
+        - /bin/bash
+        - -c
+        image: nvcr.io/nvidia/cuda:12.9.0-devel-ubuntu24.04
+        imagePullPolicy: IfNotPresent
+        name: bench
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - IPC_LOCK
+            - SYS_PTRACE
+            - SYS_ADMIN
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dev-shm
+        - mountPath: /dev
+          name: dev-host
+        - mountPath: /data
+          name: model-cache
+      dnsPolicy: ClusterFirst
+      hostIPC: true
+      nodeSelector:
+        node.kubernetes.io/instance-type: p5en.48xlarge
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 64Gi
+        name: dev-shm
+      - hostPath:
+          path: /dev
+          type: Directory
+        name: dev-host
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: YOUR_MODEL_PVC   # <<< EDIT: a PVC (e.g. FSx) holding the HF model cache, or swap for emptyDir
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate

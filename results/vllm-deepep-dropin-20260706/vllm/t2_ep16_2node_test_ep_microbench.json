@@ -1,0 +1,60 @@
+{
+  "test": "DeepEP V2 tests/elastic/test_ep.py (torchrun-native wrapper, first EP mode case)",
+  "date_utc": "2026-07-06T22:54Z",
+  "topology": "2x p5en.48xlarge H200 (16 ranks, EP16), cross-node over EFA",
+  "transport": "NCCL-GIN v2 CPU-proxy (NCCL_GIN_TYPE=2, OFI_NCCL_GIN_GDAKI=0), aws-ofi-nccl 9c44 v1-fallback plugin (gdrdrv-2.4 nodes)",
+  "deepep_provenance": "public deepseek-ai/DeepEP@b306af06 + PR#612 trio (164c82d auto-QP-cap, 62a38bf get_rdma_gbs, 146cc35 kScaleoutUpdateInterval=16) == scripts/patches/0001-0003",
+  "config": {
+    "num_tokens": 128,
+    "hidden": 7168,
+    "num_topk": 8,
+    "num_experts": 256,
+    "num_sms": 4,
+    "num_qps": 6,
+    "EP_EFA_MAX_QPS": 6,
+    "EP_EFA_RDMA_GBS": 25.0,
+    "OFI_NCCL_GIN_MAX_REQUESTS": 512,
+    "skip_check": true
+  },
+  "phases_us": {
+    "dispatch": {
+      "n": 16,
+      "p50": 185.4,
+      "mean": 184.0,
+      "min": 175.497,
+      "max": 189.389
+    },
+    "expanded dispatch": {
+      "n": 16,
+      "p50": 179.8,
+      "mean": 179.2,
+      "min": 166.994,
+      "max": 190.008
+    },
+    "cached dispatch": {
+      "n": 16,
+      "p50": 231.6,
+      "mean": 229.9,
+      "min": 221.464,
+      "max": 236.117
+    },
+    "combine": {
+      "n": 16,
+      "p50": 258.2,
+      "mean": 259.2,
+      "min": 248.727,
+      "max": 273.666
+    },
+    "reduced combine": {
+      "n": 16,
+      "p50": 289.8,
+      "mean": 289.4,
+      "min": 276.761,
+      "max": 298.537
+    }
+  },
+  "dc_p50_us": 443.6,
+  "contract_us": 740,
+  "efa_proof": "NCCL log: 'Selected provider is efa, fabric is efa-direct (found 16 nics)' all ranks; scaleout ~5 GB/s per rank measured by kineto. Pod sysfs exposes no hw_counters (tx_bytes check impossible in-pod).",
+  "exit": "rc=0 both nodes, 16/16 ranks printed DONE. gin_host.cc error-6 lines are teardown-only (post-DONE commReclaim), benign."
+}
