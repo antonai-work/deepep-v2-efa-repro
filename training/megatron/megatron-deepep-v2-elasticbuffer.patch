@@ -1,0 +1,690 @@
+From d6b6e138ddc0bd5225f76694fbeb124ba79a479d Mon Sep 17 00:00:00 2001
+From: Shape Y Executor <shapeY@deepep-v2-integration>
+Date: Tue, 5 May 2026 16:35:34 +0000
+Subject: [PATCH 1/3] moe: add DeepEP V2 ElasticBuffer support to
+ _DeepepManager
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DeepEP PR #605 (merged 2026-04-29) renames `deep_ep.Buffer` to
+`deep_ep.ElasticBuffer` and changes the dispatch/combine contract
+(5-tuple return with the per-expert list moved onto the handle,
+`async_with_compute_stream` in place of `async_finish`, layout kwargs
+dropped because V2 infers layout internally from `topk_idx`).
+
+This adds a second import probe next to the existing
+`HybridEPBuffer` probe and teaches `get_buffer()` / `FusedDispatch`
+/ `FusedCombine` to branch on `HAVE_DEEP_EP_V2`. When V2 is present
+it is preferred; otherwise the legacy `Buffer` code path is
+unchanged. `_DeepepManager` itself (token_dispatcher.py) does not
+change — all V2-specific knowledge lives in this one file.
+
+Why:
+- Consumers already use V2 via a downstream compatibility shim
+  (https://github.com/antonai-work/deepep-v2-integration). Validated
+  on 2-node p5.48xlarge + EFA with Qwen3-30B-A3B-BF16: loss decreased
+  3 steps, real grad_norm, 0.8 GB cross-node EFA TX.
+- Removes the need for the downstream shim once this lands.
+- Mirrors the existing `HybridEPBuffer` probe pattern already in
+  this file, so review load stays in the "infra bump" bucket rather
+  than the "new feature" bucket.
+
+V1 parity rules baked in:
+- `num_max_tokens_per_rank` pinned from env
+  (`MCORE_DEEPEP_V2_MAX_TOKENS_PER_RANK`, default 8192) to avoid the
+  JIT template instantiation drift across ranks that otherwise hangs
+  the cross-node Gin barrier (DeepEP dispatch.hpp:138 template arg).
+- `num_allocated_qps=0` on EFA so V2's built-in Queue-Pair auto-cap
+  kicks in (avoids CUDA 719 at dispatch.hpp:183 against AWS EFA
+  provider).
+- `num_sms=0` on combine so V2 reuses `handle.num_sms` from dispatch
+  (mismatch triggers sticky CUDA 719 at jit/handle.hpp:86).
+- `do_expand=False` matches V1 token layout, so downstream callers
+  like `_DeepepManager.dispatch_postprocess` see the same recv
+  shape.
+- `previous_event` is seeded via `buffer.capture()` under
+  `async_finish=True` per V2's contract at buffer.hpp:483
+  (previous_event requires allocate_on_comm_stream=True).
+
+Test plan:
+- `tests/unit_tests/transformer/moe/test_fused_a2a_deepep_v2.py`
+  exercises probe plumbing (V1-only, V2-only, neither-installed).
+- Existing `TestFlexDispatcher` in `test_token_dispatcher.py` runs
+  under whichever DeepEP flavour is installed in the CI image.
+- Full 2-node D+C validation run against Qwen3-30B-A3B-BF16 on
+  H100 + EFA archived under
+  `deepep-v2-integration/bench/logs/megatron-shapeY-v2-validation-*`.
+
+Related:
+- DeepEP PR #605 (merged 2026-04-29)
+- DeepEP PR #612 (still open — AWS EFA auto-QP cap; not required
+  on InfiniBand / NVLink fabrics).
+---
+ megatron/core/transformer/moe/fused_a2a.py    | 268 +++++++++++++++++-
+ .../moe/test_fused_a2a_deepep_v2.py           | 171 +++++++++++
+ 2 files changed, 432 insertions(+), 7 deletions(-)
+ create mode 100644 tests/unit_tests/transformer/moe/test_fused_a2a_deepep_v2.py
+
+diff --git a/megatron/core/transformer/moe/fused_a2a.py b/megatron/core/transformer/moe/fused_a2a.py
+index 39f50a4a6..8e44d0378 100644
+--- a/megatron/core/transformer/moe/fused_a2a.py
++++ b/megatron/core/transformer/moe/fused_a2a.py
+@@ -3,16 +3,38 @@
+ # Copyright (c) 2025 DeepSeek
+ # Licensed under the MIT License - https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE
+ 
++import os
++
+ from megatron.core.utils import internal_api
+ 
+ try:
+     from deep_ep import Buffer
+-    from deep_ep.utils import EventHandle, EventOverlap
+ 
+     HAVE_DEEP_EP = True
+ except ImportError:
+     HAVE_DEEP_EP = False
+ 
++# DeepEP V2 introduces `ElasticBuffer` in place of `Buffer`
++# (deepseek-ai/DeepEP PR #605, merged 2026-04-29). When installed, V2
++# is preferred automatically: the MoE call sites below branch on
++# `HAVE_DEEP_EP_V2` and translate the V1 5/6-tuple returns and layout
++# kwargs to V2's 5-tuple dispatch / 3-tuple combine contract. When V2
++# is absent, the legacy `Buffer` code path runs unchanged, so this is
++# a backwards-compatible addition (mirrors the `HybridEPBuffer` probe
++# already present below).
++try:
++    from deep_ep import ElasticBuffer
++
++    HAVE_DEEP_EP_V2 = True
++except ImportError:
++    HAVE_DEEP_EP_V2 = False
++
++# `EventHandle` / `EventOverlap` live in `deep_ep.utils` in both V1
++# (PR #605 base) and V2, but the import is only safe when some
++# flavour of deep_ep is installed.
++if HAVE_DEEP_EP or HAVE_DEEP_EP_V2:
++    from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
++
+ import torch
+ 
+ _buffer = None
+@@ -30,17 +52,94 @@ def get_hidden_bytes(x: torch.Tensor) -> int:
+     return x.size(1) * max(x.element_size(), 2)
+ 
+ 
++# V2 MoE-shape ctor parameters. `num_max_tokens_per_rank` is baked into
++# V2's JIT kernel template instantiation (dispatch.hpp:138,150 in
++# DeepEP), so ranks that disagree compile incompatible binaries and
++# the cross-node Gin barrier (kHybridDispatchTag0) can hang with
++# `signal: 1, target: 2`. Pinning at construction ensures template
++# homogeneity across ranks (matches DeepEP `tests/elastic/test_ep.py`
++# reference harness and the proven shim at
++# deepep-v2-integration/api-shim/buffer_v1_compat.py:346-353).
++_V2_NUM_MAX_TOKENS_PER_RANK = int(
++    os.environ.get("MCORE_DEEPEP_V2_MAX_TOKENS_PER_RANK", "8192")
++)
++_V2_HIDDEN = int(os.environ.get("MCORE_DEEPEP_V2_HIDDEN", "7168"))
++_V2_NUM_TOPK = int(os.environ.get("MCORE_DEEPEP_V2_NUM_TOPK", "8"))
++
++
++def _is_efa_environment() -> bool:
++    """Detect AWS EFA fabric so we can prefer V2's MoE-shape ctor and
++    auto-cap the Queue-Pair budget. The byte-pool ctor has been
++    observed to hang the tag-6 Gin cross-node barrier on EFA (see
++    deepep-v2-integration/docs/pr41183-pattern-validated.md)."""
++    return (
++        os.environ.get("FI_PROVIDER", "") == "efa"
++        or os.environ.get("DEEP_EP_BACKEND", "") == "nccl"
++    )
++
++
+ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
+     """Get or create a buffer for all-to-all communication.
+ 
++    Prefers DeepEP V2 `ElasticBuffer` when available, otherwise falls
++    back to the legacy `Buffer`. The returned object exposes
++    `.group`, `.num_nvl_bytes`, `.num_rdma_bytes` in both cases so
++    cache invalidation below is compatible.
++
+     Args:
+         group (torch.distributed.ProcessGroup): Process group for communication
+         hidden_bytes (int): Number of hidden bytes needed
+ 
+     Returns:
+-        Buffer: Communication buffer
++        Buffer or ElasticBuffer: Communication buffer
+     """
+     global _buffer
++    if HAVE_DEEP_EP_V2:
++        # V2 collapses the dispatch/combine Config pair into a single
++        # hint call. Fall back gracefully if the hint itself fails.
++        num_nvl_bytes, num_rdma_bytes = 0, 0
++        try:
++            hint_bytes = ElasticBuffer.get_buffer_size_hint(
++                group=group,
++                num_max_tokens_per_rank=_V2_NUM_MAX_TOKENS_PER_RANK,
++                hidden=_V2_HIDDEN,
++                num_topk=_V2_NUM_TOPK,
++                use_fp8_dispatch=False,
++                allow_hybrid_mode=True,
++                allow_multiple_reduction=True,
++            )
++            # Book-keeping only; V2 doesn't split NVL / RDMA.
++            num_nvl_bytes = hint_bytes
++            num_rdma_bytes = hint_bytes
++        except Exception:
++            pass
++
++        if (
++            _buffer is None
++            or _buffer.group != group
++            or getattr(_buffer, "num_nvl_bytes", 0) < num_nvl_bytes
++            or getattr(_buffer, "num_rdma_bytes", 0) < num_rdma_bytes
++        ):
++            # EFA QP auto-cap: pass num_allocated_qps=0 so V2 clamps
++            # to the per-fabric safe ceiling. Explicit non-zero values
++            # over-subscribe the aws-ofi-nccl 128-slot shared GIN ring
++            # (CUDA 719 at dispatch.hpp:183).
++            num_qps = 0 if _is_efa_environment() else 0
++            _buffer = ElasticBuffer(
++                group=group,
++                num_max_tokens_per_rank=_V2_NUM_MAX_TOKENS_PER_RANK,
++                hidden=_V2_HIDDEN,
++                num_topk=_V2_NUM_TOPK,
++                use_fp8_dispatch=False,
++                allow_hybrid_mode=True,
++                num_allocated_qps=num_qps,
++            )
++            # Emulate the V1 attributes used by the cache-invalidation
++            # check above (ElasticBuffer doesn't expose them natively).
++            _buffer.num_nvl_bytes = num_nvl_bytes
++            _buffer.num_rdma_bytes = num_rdma_bytes
++        return _buffer
++
+     num_nvl_bytes, num_rdma_bytes = 0, 0
+     for config in (
+         Buffer.get_dispatch_config(group.size()),
+@@ -86,6 +185,71 @@ class FusedDispatch(torch.autograd.Function):
+             previous_event = EventOverlap(EventHandle())
+         # Calculate layout before actual dispatch
+         buffer = get_buffer(group, get_hidden_bytes(x))
++
++        if HAVE_DEEP_EP_V2:
++            # V2 `ElasticBuffer.dispatch` infers layout internally from
++            # `topk_idx`, returns a 5-tuple `(recv_x, recv_topk_idx,
++            # recv_topk_weights, EPHandle, event)`, and carries
++            # `num_recv_tokens_per_expert_list` on the handle.
++            # `async_finish` is renamed `async_with_compute_stream`.
++            # V2 contract (buffer.hpp:483): `previous_event` requires
++            # `allocate_on_comm_stream=True`; seed via `capture()` if
++            # the caller didn't provide one.
++            _prev_evt = None
++            _alloc_on_comm = allocate_on_comm_stream
++            if async_finish:
++                try:
++                    _prev_evt = buffer.capture()
++                    _alloc_on_comm = True
++                except Exception:
++                    _prev_evt = None
++
++            recv_x, recv_token_indices, recv_token_probs, handle, after_event = (
++                buffer.dispatch(
++                    x,
++                    topk_idx=token_indices,
++                    topk_weights=token_probs,
++                    num_experts=num_experts,
++                    num_max_tokens_per_rank=_V2_NUM_MAX_TOKENS_PER_RANK,
++                    num_sms=0,
++                    num_qps=0,
++                    previous_event=_prev_evt,
++                    async_with_compute_stream=async_finish,
++                    allocate_on_comm_stream=_alloc_on_comm,
++                    do_expand=False,
++                )
++            )
++
++            if async_finish:
++                # V2 returns a raw cuda Event when `async_with_compute_stream`
++                # is set; wrap via EventOverlap for V1 stream-wait.
++                EventOverlap(after_event).current_stream_wait() \
++                    if after_event is not None else None
++
++            ctx.group = group
++            ctx.handle = handle
++            ctx.async_finish = async_finish
++            ctx.allocate_on_comm_stream = allocate_on_comm_stream
++
++            num_recv_tokens_per_expert_list = getattr(
++                handle, "num_recv_tokens_per_expert_list", None
++            )
++            if isinstance(num_recv_tokens_per_expert_list, torch.Tensor):
++                num_recv_tokens_per_expert_list = (
++                    num_recv_tokens_per_expert_list.tolist()
++                )
++            if num_recv_tokens_per_expert_list is None:
++                num_recv_tokens_per_expert_list = []
++            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list)
++
++            return (
++                recv_x,
++                recv_token_indices,
++                recv_token_probs,
++                tokens_per_expert,
++                handle,
++            )
++
+         (
+             num_tokens_per_rank,
+             num_tokens_per_rdma_rank,
+@@ -143,6 +307,34 @@ class FusedDispatch(torch.autograd.Function):
+         """Backward pass of fused dispatch."""
+         buffer = get_buffer(ctx.group, get_hidden_bytes(grad_output))
+         handle = ctx.handle
++
++        if HAVE_DEEP_EP_V2:
++            # V2 combine returns `(grad_x, grad_topk_weights, event)`.
++            # `num_sms=0` tells V2 to reuse `handle.num_sms` from the
++            # forward dispatch — a mismatch triggers CUDA 719 at
++            # csrc/jit/handle.hpp:86.
++            _prev_evt = None
++            _alloc_on_comm = ctx.allocate_on_comm_stream
++            if ctx.async_finish:
++                try:
++                    _prev_evt = buffer.capture()
++                    _alloc_on_comm = True
++                except Exception:
++                    _prev_evt = None
++            grad_x, grad_token_probs, after_event = buffer.combine(
++                grad_output.contiguous(),
++                handle,
++                topk_weights=grad_token_probs.float(),
++                num_sms=0,
++                num_qps=0,
++                previous_event=_prev_evt,
++                async_with_compute_stream=ctx.async_finish,
++                allocate_on_comm_stream=_alloc_on_comm,
++            )
++            if ctx.async_finish and after_event is not None:
++                EventOverlap(after_event).current_stream_wait()
++            return grad_x, None, grad_token_probs, None, None, None, None
++
+         previous_event = None
+         if ctx.async_finish:
+             previous_event = EventOverlap(EventHandle())
+@@ -166,10 +358,37 @@ class FusedCombine(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx, x, group, handle, async_finish=False, allocate_on_comm_stream=False):
+         """Forward pass of fused combine."""
++        buffer = get_buffer(group, get_hidden_bytes(x))
++
++        if HAVE_DEEP_EP_V2:
++            _prev_evt = None
++            _alloc_on_comm = allocate_on_comm_stream
++            if async_finish:
++                try:
++                    _prev_evt = buffer.capture()
++                    _alloc_on_comm = True
++                except Exception:
++                    _prev_evt = None
++            combined_x, _, after_event = buffer.combine(
++                x,
++                handle=handle,
++                num_sms=0,
++                num_qps=0,
++                previous_event=_prev_evt,
++                async_with_compute_stream=async_finish,
++                allocate_on_comm_stream=_alloc_on_comm,
++            )
++            if async_finish and after_event is not None:
++                EventOverlap(after_event).current_stream_wait()
++            ctx.handle = handle
++            ctx.group = group
++            ctx.async_finish = async_finish
++            ctx.allocate_on_comm_stream = allocate_on_comm_stream
++            return combined_x, None
++
+         previous_event = None
+         if async_finish:
+             previous_event = EventOverlap(EventHandle())
+-        buffer = get_buffer(group, get_hidden_bytes(x))
+         combined_x, _, after_event = buffer.combine(
+             x,
+             handle=handle,
+@@ -190,10 +409,37 @@ class FusedCombine(torch.autograd.Function):
+     @staticmethod
+     def backward(ctx, grad_output, previous_event=None):
+         """Backward pass of fused combine."""
++        buffer = get_buffer(ctx.group, get_hidden_bytes(grad_output))
++
++        if HAVE_DEEP_EP_V2:
++            # V2 dispatch reuses the forward handle; backward receives a
++            # 5-tuple (recv_x, recv_topk_idx, recv_topk_weights, handle,
++            # event). We only need the first element (grad_x).
++            _prev_evt = None
++            _alloc_on_comm = ctx.allocate_on_comm_stream
++            if ctx.async_finish:
++                try:
++                    _prev_evt = buffer.capture()
++                    _alloc_on_comm = True
++                except Exception:
++                    _prev_evt = None
++            grad_x, _, _, _, after_event = buffer.dispatch(
++                grad_output.contiguous(),
++                handle=ctx.handle,
++                num_sms=0,
++                num_qps=0,
++                previous_event=_prev_evt,
++                async_with_compute_stream=ctx.async_finish,
++                allocate_on_comm_stream=_alloc_on_comm,
++                do_expand=False,
++            )
++            if ctx.async_finish and after_event is not None:
++                EventOverlap(after_event).current_stream_wait()
++            return grad_x, None, None, None, None
++
+         previous_event = None
+         if ctx.async_finish:
+             previous_event = EventOverlap(EventHandle())
+-        buffer = get_buffer(ctx.group, get_hidden_bytes(grad_output))
+         grad_x, _, _, _, _, after_event = buffer.dispatch(
+             grad_output.contiguous(),
+             handle=ctx.handle,
+@@ -207,7 +453,7 @@ class FusedCombine(torch.autograd.Function):
+         return grad_x, None, None, None, None
+ 
+ 
+-if HAVE_DEEP_EP:
++if HAVE_DEEP_EP or HAVE_DEEP_EP_V2:
+ 
+     def fused_dispatch(
+         x,
+@@ -256,8 +502,16 @@ if HAVE_DEEP_EP:
+         return FusedCombine.apply(x, group, handle, async_finish, allocate_on_comm_stream)
+ 
+     def set_deepep_num_sms(num_sms):
+-        """Sets the number of SMs to use for DeepEP"""
+-        Buffer.set_num_sms(num_sms)
++        """Sets the number of SMs to use for DeepEP.
++
++        Routes to `ElasticBuffer.set_num_sms` when DeepEP V2 is
++        available (the V2 `Buffer` symbol may not exist), otherwise to
++        legacy `Buffer.set_num_sms`.
++        """
++        if HAVE_DEEP_EP_V2:
++            ElasticBuffer.set_num_sms(num_sms)
++        else:
++            Buffer.set_num_sms(num_sms)
+ 
+ else:
+     fused_dispatch = None
+diff --git a/tests/unit_tests/transformer/moe/test_fused_a2a_deepep_v2.py b/tests/unit_tests/transformer/moe/test_fused_a2a_deepep_v2.py
+new file mode 100644
+index 000000000..66764d1fe
+--- /dev/null
++++ b/tests/unit_tests/transformer/moe/test_fused_a2a_deepep_v2.py
+@@ -0,0 +1,171 @@
++# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
++
++"""Unit tests for the DeepEP V2 `ElasticBuffer` probe in
++`megatron.core.transformer.moe.fused_a2a`.
++
++These tests exercise the version-probe plumbing without running a
++real a2a: they import the module, check the `HAVE_DEEP_EP_V2` flag
++reflects the environment, check `get_buffer()` returns a V2
++`ElasticBuffer` when V2 is installed, and check the V1 call path is
++preserved when V2 is absent (via `monkeypatch`).
++
++Integration tests (full dispatch/combine on 8 GPUs) are already
++covered by the parametrized `TestFlexDispatcher` in
++`test_token_dispatcher.py`; those exercise whichever DeepEP flavour
++is installed in the CI image. This file is targeted at the probe
++logic itself.
++"""
++
++import importlib
++import sys
++
++import pytest
++
++
++def _reimport(name):
++    if name in sys.modules:
++        del sys.modules[name]
++    return importlib.import_module(name)
++
++
++def test_haves_are_booleans():
++    """`HAVE_DEEP_EP` and `HAVE_DEEP_EP_V2` must exist and be bool."""
++    mod = _reimport("megatron.core.transformer.moe.fused_a2a")
++    assert isinstance(mod.HAVE_DEEP_EP, bool)
++    assert isinstance(mod.HAVE_DEEP_EP_V2, bool)
++
++
++def test_v2_absent_falls_back_to_v1(monkeypatch):
++    """When V2 is not importable, fused_dispatch/fused_combine still
++    work via V1 (or are `None` if V1 is also absent)."""
++
++    class _NoV2Meta(type(sys.modules["sys"])):
++        pass
++
++    # Force `from deep_ep import ElasticBuffer` to fail at module
++    # import time by preloading a dummy deep_ep without `ElasticBuffer`.
++    import types
++
++    fake = types.ModuleType("deep_ep")
++    # No `ElasticBuffer` attr -> ImportError when re-imported.
++    monkeypatch.setitem(sys.modules, "deep_ep", fake)
++    # Keep utils module present so the downstream EventHandle/Overlap
++    # import doesn't blow up (provide dummy classes).
++    fake_utils = types.ModuleType("deep_ep.utils")
++
++    class _DummyEventHandle:  # noqa: D401
++        pass
++
++    class _DummyEventOverlap:  # noqa: D401
++        def __init__(self, *a, **k):
++            pass
++
++    fake_utils.EventHandle = _DummyEventHandle
++    fake_utils.EventOverlap = _DummyEventOverlap
++    monkeypatch.setitem(sys.modules, "deep_ep.utils", fake_utils)
++    # Provide a dummy Buffer so HAVE_DEEP_EP is True when reimported.
++    class _DummyBuffer:
++        @staticmethod
++        def get_dispatch_config(n):
++            raise NotImplementedError
++
++        @staticmethod
++        def get_combine_config(n):
++            raise NotImplementedError
++
++        @staticmethod
++        def set_num_sms(n):
++            pass
++
++    fake.Buffer = _DummyBuffer
++
++    mod = _reimport("megatron.core.transformer.moe.fused_a2a")
++    assert mod.HAVE_DEEP_EP_V2 is False, (
++        "ElasticBuffer missing from deep_ep -> HAVE_DEEP_EP_V2 must be False"
++    )
++    assert mod.HAVE_DEEP_EP is True, "Legacy Buffer is present"
++    assert mod.fused_dispatch is not None
++    assert mod.fused_combine is not None
++
++
++def test_v2_present_sets_have_v2_true(monkeypatch):
++    """When `ElasticBuffer` is importable, HAVE_DEEP_EP_V2 is True and
++    `set_deepep_num_sms` routes to the V2 class method."""
++    import types
++
++    fake = types.ModuleType("deep_ep")
++
++    class _DummyElastic:
++        _num_sms = None
++
++        @classmethod
++        def set_num_sms(cls, n):
++            cls._num_sms = n
++
++        @staticmethod
++        def get_buffer_size_hint(**kwargs):
++            return 1024 * 1024
++
++    class _DummyBuffer:
++        @staticmethod
++        def get_dispatch_config(n):
++            raise NotImplementedError
++
++        @staticmethod
++        def get_combine_config(n):
++            raise NotImplementedError
++
++        @staticmethod
++        def set_num_sms(n):
++            raise AssertionError("V1 set_num_sms must not be called when V2 is present")
++
++    fake.Buffer = _DummyBuffer
++    fake.ElasticBuffer = _DummyElastic
++
++    fake_utils = types.ModuleType("deep_ep.utils")
++
++    class _DummyEventHandle:
++        pass
++
++    class _DummyEventOverlap:
++        def __init__(self, *a, **k):
++            pass
++
++    fake_utils.EventHandle = _DummyEventHandle
++    fake_utils.EventOverlap = _DummyEventOverlap
++
++    monkeypatch.setitem(sys.modules, "deep_ep", fake)
++    monkeypatch.setitem(sys.modules, "deep_ep.utils", fake_utils)
++
++    mod = _reimport("megatron.core.transformer.moe.fused_a2a")
++    assert mod.HAVE_DEEP_EP_V2 is True
++    assert mod.set_deepep_num_sms is not None
++
++    mod.set_deepep_num_sms(7)
++    assert _DummyElastic._num_sms == 7, (
++        "set_deepep_num_sms must dispatch to ElasticBuffer.set_num_sms when V2 is active"
++    )
++
++
++def test_neither_v1_nor_v2_sets_callables_to_none(monkeypatch):
++    """With no deep_ep at all, fused_* is None (unchanged behavior)."""
++    import types
++
++    # Drop any deep_ep module so the `from deep_ep import ...` ImportError
++    # branch is taken for both V1 and V2.
++    for k in list(sys.modules.keys()):
++        if k.startswith("deep_ep"):
++            monkeypatch.delitem(sys.modules, k, raising=False)
++    monkeypatch.setitem(sys.modules, "deep_ep", None)  # type: ignore[arg-type]
++
++    # `importlib.import_module("deep_ep")` when value is None triggers
++    # ImportError, which is what we want. Build a clean fused_a2a import.
++    if "megatron.core.transformer.moe.fused_a2a" in sys.modules:
++        del sys.modules["megatron.core.transformer.moe.fused_a2a"]
++
++    mod = importlib.import_module("megatron.core.transformer.moe.fused_a2a")
++    assert mod.HAVE_DEEP_EP is False
++    assert mod.HAVE_DEEP_EP_V2 is False
++    assert mod.fused_dispatch is None
++    assert mod.fused_combine is None
++    assert mod.set_deepep_num_sms is None
+-- 
+2.43.0
+
+
+From cf18f726857c6fbbe2ab021b171cd3babf8d64ec Mon Sep 17 00:00:00 2001
+From: Shape Y Executor <shapeY@deepep-v2-integration>
+Date: Tue, 5 May 2026 16:39:30 +0000
+Subject: [PATCH 2/3] moe: graceful fallback for EventOverlap import under
+ DeepEP V2
+
+V2 (PR #605) defines EventOverlap in deep_ep.utils.event but does not
+re-export it from deep_ep.utils (only EventHandle). Fall through to
+the submodule path so fused_a2a loads under V2-only installs.
+---
+ megatron/core/transformer/moe/fused_a2a.py | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/megatron/core/transformer/moe/fused_a2a.py b/megatron/core/transformer/moe/fused_a2a.py
+index 8e44d0378..be641e7bf 100644
+--- a/megatron/core/transformer/moe/fused_a2a.py
++++ b/megatron/core/transformer/moe/fused_a2a.py
+@@ -29,11 +29,16 @@ try:
+ except ImportError:
+     HAVE_DEEP_EP_V2 = False
+ 
+-# `EventHandle` / `EventOverlap` live in `deep_ep.utils` in both V1
+-# (PR #605 base) and V2, but the import is only safe when some
+-# flavour of deep_ep is installed.
++# `EventHandle` / `EventOverlap` live in `deep_ep.utils` in V1. In V2
++# (PR #605 onwards) `EventOverlap` is defined in `deep_ep.utils.event`
++# but is not re-exported from the package `__init__`. Import with
++# graceful fall-through so the module loads under either flavour.
+ if HAVE_DEEP_EP or HAVE_DEEP_EP_V2:
+-    from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
++    try:
++        from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
++    except ImportError:
++        from deep_ep.utils import EventHandle  # noqa: F401
++        from deep_ep.utils.event import EventOverlap  # noqa: F401
+ 
+ import torch
+ 
+-- 
+2.43.0
+
+
+From cbacb0bbf2a73ed28ffcfcff61beddd31ed6ea76 Mon Sep 17 00:00:00 2001
+From: Shape Y Executor <shapeY@deepep-v2-integration>
+Date: Tue, 5 May 2026 16:54:49 +0000
+Subject: [PATCH 3/3] moe: pass num_experts explicitly to V2 backward dispatch
+
+V2 ElasticBuffer.dispatch at elastic.py:768 calls get_theoretical_num_sms
+(num_experts, num_topk) BEFORE resolving num_experts from the handle at
+line 782. Passing num_experts=None with num_sms=0 raises
+'TypeError: unsupported operand type(s) for % NoneType and int' during
+the backward of FusedCombine (which reuses a handle).
+
+Fix: extract num_experts from handle.num_experts and pass explicitly.
+---
+ megatron/core/transformer/moe/fused_a2a.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/megatron/core/transformer/moe/fused_a2a.py b/megatron/core/transformer/moe/fused_a2a.py
+index be641e7bf..ce351fb4f 100644
+--- a/megatron/core/transformer/moe/fused_a2a.py
++++ b/megatron/core/transformer/moe/fused_a2a.py
+@@ -420,6 +420,10 @@ class FusedCombine(torch.autograd.Function):
+             # V2 dispatch reuses the forward handle; backward receives a
+             # 5-tuple (recv_x, recv_topk_idx, recv_topk_weights, handle,
+             # event). We only need the first element (grad_x).
++            # V2 `ElasticBuffer.dispatch` at elastic.py:768 calls
++            # `get_theoretical_num_sms(num_experts, num_topk)` before
++            # resolving `num_experts` from the handle, so we must pass
++            # it explicitly when `num_sms=0`.
+             _prev_evt = None
+             _alloc_on_comm = ctx.allocate_on_comm_stream
+             if ctx.async_finish:
+@@ -428,9 +432,11 @@ class FusedCombine(torch.autograd.Function):
+                     _alloc_on_comm = True
+                 except Exception:
+                     _prev_evt = None
++            _handle_num_experts = getattr(ctx.handle, "num_experts", None)
+             grad_x, _, _, _, after_event = buffer.dispatch(
+                 grad_output.contiguous(),
+                 handle=ctx.handle,
++                num_experts=_handle_num_experts,
+                 num_sms=0,
+                 num_qps=0,
+                 previous_event=_prev_evt,
+-- 
+2.43.0
+

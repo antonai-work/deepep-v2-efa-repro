@@ -1,11 +1,13 @@
-# DeepEP-V2 MoE on AWS EFA — reproduce all four gates from PUBLIC roots only
+# DeepEP-V2 MoE on AWS EFA — reproduce every gate from PUBLIC roots only
 
 > New here? **Start with [GUIDE.md](GUIDE.md)** — what to run, in what order,
 > and what "pass" looks like. This page is the full recipe + measured numbers.
+> Framework coverage at a glance: section 9 (all six frameworks + the walls).
 
-Reproduce all four acceptance gates — the **micro D+C benchmark**, the
-**vLLM + AIPerf** lane, the **SGLang + AIPerf** lane, and the **TRT-LLM
-(api-shim) + AIPerf** lane — starting from **public upstreams only**: official
+Reproduce all acceptance gates — the **micro D+C benchmark**, three
+**inference lanes with AIPerf** (vLLM, SGLang, TRT-LLM native seam), and two
+**training lanes** (Megatron-LM loss/grad-norm, NeMo-RL rollout) — starting
+from **public upstreams only**: official
 NVIDIA NGC bases, `deepseek-ai/DeepEP`, PyPI wheels (`vllm`, `sglang`,
 `tensorrt_llm`), `aws/aws-ofi-nccl`, and the patch files committed in this
 repo. No image, fork, or registry we published is required anywhere.
@@ -240,6 +242,27 @@ build needs `EP_NCCL_ROOT_DIR` at nccl 2.30.4 (a stray venv nccl 2.26 loses
 the official redist archive); AIPerf offline needs `TOKENIZER=<snapshot dir>`.
 Per-wall troubleshooting table: `trtllm/INSTRUCTIONS.md`.
 
+## 6b. Gates 5-6 — training lanes (Megatron-LM + NeMo-RL)
+
+Training acceptance is loss/grad-norm over EFA, not AIPerf. Both lanes ride
+the SAME substrate (§0-2) and the Megatron `fused_a2a.py` V2 seam — upstream
+as **NVIDIA/Megatron-LM PR #4632** (head publicly fetchable via
+`git fetch origin pull/4632/head`), committed here as
+`training/megatron/megatron-deepep-v2-elasticbuffer.patch`.
+
+- **Gate 5, Megatron-LM** (`training/megatron/`): patched `fused_a2a.py`
+  prefers `ElasticBuffer` natively (probe-style, V1 byte-identical
+  fallback). Driver `train_step_shapeY.py`, 2x8 GPU, `DEEP_EP_USE_V2_SHIM=0`.
+  **Measured (2026-05-05):** loss 26.41 -> 25.10 -> 24.61, grad_norm
+  30.64 -> 27.09, EFA TX 1.096 GB. `results/megatron-shapeY-20260505/`.
+- **Gate 6, NeMo-RL** (`training/nemo-rl/`): no direct deep_ep import —
+  MoE dispatch is transitive through Megatron's `fused_a2a.py`; NeMo-RL
+  itself needed only the `LD_LIBRARY_PATH` Docker fix, **merged upstream**
+  (NVIDIA-NeMo/RL #2585). Recipe YAML for 2-node GRPO with
+  `moe_enable_deepep=true` included. **Measured (2026-04-29):** rollout
+  smoke PASS 9.45s world=16; full-stack train loss 26.41 -> 24.59.
+  `results/nemo-rl-rollout-20260429/`.
+
 ## 7. Expected-numbers summary
 
 | Gate | Metric | Expected |
@@ -248,6 +271,8 @@ Per-wall troubleshooting table: `trtllm/INSTRUCTIONS.md`.
 | vLLM | AIPerf c32 agg (EPNC=1) | ~145 tok/s, 0 err |
 | SGLang | AIPerf c32 agg | ~253-255 tok/s, 0 err |
 | TRT-LLM | AIPerf c4/c32, DeepEP arm | ~66-68 / ~563-587 tok/s, 0 err, `AlltoallMethodType.DeepEP` in log (native seam and shim equivalent within noise) |
+| Megatron-LM | 3-step loss + grad_norm + EFA TX | monotonic loss drop (26.41->24.61), grad_norm finite, TX >= 1 GB |
+| NeMo-RL | rollout smoke + full-stack loss | `NEMO-RL ROLLOUT SMOKE PASS` ~9-10s; loss 26.41->24.59 |
 
 EFA proof on clusters that expose hw_counters:
 `scripts/verify_efa_traffic.sh` (TX delta >= 1 GB). On pods without
@@ -267,3 +292,22 @@ fabric is efa-direct` on all ranks + cross-node-only topology.
   explicit PID (`nvidia-smi --query-compute-apps=pid`), never `pkill -f`.
 - Ubuntu's stdlib `sitecustomize` shadows venv sitecustomize — deliver venv
   hooks via a `.pth` import line instead.
+
+## 9. Framework coverage matrix (the honest map)
+
+| Framework | DeepEP-V2 on EFA | Route in this repo | Upstream state | Evidence |
+|---|---|---|---|---|
+| vLLM | YES (native) | PyPI `vllm==0.24.0`, no source patch (§4) | #41183 MERGED 2026-06-09 | `results/vllm-deepep-dropin-20260706/` |
+| SGLang | YES (seam patch) | wheel + `sglang-0.5.11-deepep-v2-seam.patch` (§5) | #24443 OPEN | `results/sglang-deepep-dropin-20260707/` |
+| TRT-LLM | YES (native seam; native EP = MNNVL/IBGDA wall) | wheel + `trtllm-0.21.0-deepep-v2-seam.patch` (§6); api-shim kept as legacy | PR in prep (draft carries the seam); DeepEP arm slower than TRT's own dense arm at low-conc decode | `results/trtllm-deepep-dropin-20260707/` (shim + native-seam) |
+| Megatron-LM | YES (native seam) | `training/megatron/` patch = PR #4632 (§6b) | #4632 OPEN, head publicly fetchable | `results/megatron-shapeY-20260505/` |
+| NeMo-RL | YES (transitive via Megatron) | `training/nemo-rl/` (§6b) | env fix MERGED (#2585) | `results/nemo-rl-rollout-20260429/` |
+| llm-d | NOT APPLICABLE | — | its EFA story is NIXL KV-transfer, orthogonal to MoE all-to-all; no DeepEP surface to integrate | recorded as out-of-scope |
+| Dynamo (vLLM disagg) | scheduler-level only | rides the vLLM lane for MoE traffic | routing validated in the parent project; no DeepEP-specific delta | out-of-scope here |
+
+Transport constant across every YES row: `deep_ep.ElasticBuffer` over
+NCCL-GIN v2 CPU-proxy (`NCCL_GIN_TYPE=2`, `OFI_NCCL_GIN_GDAKI=0`) — never
+GDAKI/IBGDA on EFA. Perf caveat (measured, not hidden): on decode-heavy
+low-concurrency serving, DeepEP ties or loses to each framework's dense/
+allgather path on EFA; the win is expert-parallel FIT (bigger models, more
+KV headroom) and prefill-heavy regimes.
