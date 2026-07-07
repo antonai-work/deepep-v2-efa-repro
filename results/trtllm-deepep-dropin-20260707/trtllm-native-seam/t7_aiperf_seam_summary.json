@@ -1,0 +1,37 @@
+{
+  "date": "2026-07-07",
+  "arm": "seam-trtllm (NATIVE V2 seam, NO api-shim)",
+  "patch": "scripts/patches/private-deltas/trtllm-0.21.0-deepep-v2-seam.patch on public tensorrt_llm==0.21.0",
+  "serve": "mpirun -np 16 over ssh:2222, 2x p5en H200 EP16, Qwen/Qwen3-30B-A3B-FP8; NO PYTHONPATH shim, NO DEEP_EP_USE_V2_SHIM",
+  "backend_assert": {
+    "alltoall": "AlltoallMethodType.DeepEP (rank0)",
+    "seam_pg": "[deep-ep-v2-seam] initializing torch.distributed NCCL PG x16 (x32 lines incl both pods)",
+    "seam_ctor": "[deep-ep-v2-seam] constructing deep_ep.ElasticBuffer x16",
+    "efa_provider": "Selected provider is efa x16",
+    "shim_absence": "shim5c x0, api_shim x0"
+  },
+  "vs_shim_run": "shim 66.5/147.5/586.7 -> seam 67.6/142.4/563.3 (c4 +1.7%, c8 -3.5%, c32 -4.0% - within run-to-run noise)",
+  "cells": {
+    "c32_isl120": {
+      "requests": 128.0,
+      "errors": [],
+      "agg_tok_s": 563.28,
+      "per_user_tok_s": 18.39,
+      "ttft_p50_ms": 225.3
+    },
+    "c4_isl120": {
+      "requests": 40.0,
+      "errors": [],
+      "agg_tok_s": 67.64,
+      "per_user_tok_s": 18.72,
+      "ttft_p50_ms": 165.3
+    },
+    "c8_isl120": {
+      "requests": 64.0,
+      "errors": [],
+      "agg_tok_s": 142.38,
+      "per_user_tok_s": 18.71,
+      "ttft_p50_ms": 168.9
+    }
+  }
+}

@@ -1,0 +1,5 @@
+AIPerf sweep: arm=seam-trtllm model=d206ba732169f29bb77fbf80fc2c4b81d4d30782 url=http://127.0.0.1:8000
+CELL c4_isl120 arm=seam-trtllm conc=4 isl=120 osl=128 reqs 40.0 agg_tps 67.64 per_user 18.72 ttft_p50_ms 165.3
+CELL c8_isl120 arm=seam-trtllm conc=8 isl=120 osl=128 reqs 64.0 agg_tps 142.38 per_user 18.71 ttft_p50_ms 168.9
+CELL c32_isl120 arm=seam-trtllm conc=32 isl=120 osl=128 reqs 128.0 agg_tps 563.28 per_user 18.39 ttft_p50_ms 225.3
+SWEEP_DONE arm=seam-trtllm

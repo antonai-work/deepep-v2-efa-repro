@@ -1,0 +1,232 @@
+--- a/tensorrt_llm/_torch/modules/fused_moe/deep_ep_utils.py
++++ b/tensorrt_llm/_torch/modules/fused_moe/deep_ep_utils.py
+@@ -1,5 +1,6 @@
+ # Adapted from
+ # https://github.com/deepseek-ai/DeepEP/blob/aae9fa9a6dd0fec2a723fbb85ec4b22460fab670/README.md
++import os
+ import weakref
+ from typing import List, Tuple, Union
+ 
+@@ -8,11 +9,85 @@
+ from tensorrt_llm._utils import local_mpi_size, mpi_comm
+ from tensorrt_llm.mapping import Mapping
+ 
++# DeepEP-V2 seam: prefer the V2 ElasticBuffer API (deepseek-ai/DeepEP post-#605)
++# when the installed deep_ep provides it; fall back to the V1 Buffer API.
++# V2 is required for non-MNNVL RDMA fabrics (e.g. AWS EFA via NCCL-GIN):
++# V1's NVSHMEM/IBGDA internode path does not function there, while
++# ElasticBuffer probes its own transport (NCCL-GIN CPU-proxy on EFA).
++# Opt out with TRTLLM_DEEP_EP_FORCE_V1=1.
++deep_ep_v2 = False
+ try:
+     from deep_ep import Buffer
+     deep_ep_installed = True
+ except ModuleNotFoundError:
+     deep_ep_installed = False
++if os.environ.get("TRTLLM_DEEP_EP_FORCE_V1", "0") != "1":
++    try:
++        from deep_ep import ElasticBuffer
++        deep_ep_v2 = True
++        deep_ep_installed = True
++    except (ModuleNotFoundError, ImportError):
++        pass
++
++
++def _in_meta_init_mode() -> bool:
++    """True when TRT-LLM's MetaInitMode drives tensor creation (weights-load
++    prepass). Constructing ElasticBuffer then would trip the meta-tensor
++    guard inside dist.all_gather_object (check_nvlink_connections)."""
++    try:
++        from tensorrt_llm._torch.models.modeling_utils import MetaInitMode
++        import torch.utils._python_dispatch as _pd
++        stack = _pd._get_current_dispatch_mode_stack()
++    except Exception:
++        return False
++    return any(isinstance(m, MetaInitMode) for m in stack)
++
++
++def _ensure_torch_dist_from_mpi():
++    """Bootstrap the default torch.distributed NCCL PG from MPI rendezvous.
++
++    TRT-LLM is MPI-launched and fires MoE buffer reservation before (or
++    without ever) calling torch.distributed.init_process_group. V2
++    ElasticBuffer requires a torch ProcessGroup. Rendezvous:
++      * RANK/WORLD_SIZE from MPI.COMM_WORLD
++      * MASTER_ADDR from env (a cross-node-routable IP) or rank-0 bcast of
++        the local hostname (only valid if hostnames resolve cross-node)
++      * MASTER_PORT from MASTER_PORT or TRTLLM_SHIM_PG_MASTER_PORT (29555)
++    Collective: every rank must reach this before any rank returns.
++    """
++    import socket
++    import sys
++    import torch.distributed as dist
++
++    if dist.is_available() and dist.is_initialized():
++        return
++
++    from mpi4py import MPI
++    comm = MPI.COMM_WORLD
++    rank = comm.Get_rank()
++    world_size = comm.Get_size()
++
++    master_addr = os.environ.get("MASTER_ADDR")
++    if not master_addr:
++        master_addr = socket.gethostname() if rank == 0 else None
++        master_addr = comm.bcast(master_addr, root=0)
++    master_port = os.environ.get("MASTER_PORT") or os.environ.get(
++        "TRTLLM_SHIM_PG_MASTER_PORT", "29555")
++
++    if torch.cuda.is_available():
++        local_rank_env = (os.environ.get("LOCAL_RANK")
++                          or os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
++                          or os.environ.get("SLURM_LOCALID"))
++        local_rank = int(local_rank_env) if local_rank_env is not None \
++            else rank % torch.cuda.device_count()
++        torch.cuda.set_device(local_rank)
++
++    print(f"[deep-ep-v2-seam] initializing torch.distributed NCCL PG "
++          f"rank={rank}/{world_size} master={master_addr}:{master_port}",
++          file=sys.stderr, flush=True)
++    dist.init_process_group(backend="nccl",
++                            init_method=f"tcp://{master_addr}:{master_port}",
++                            rank=rank, world_size=world_size)
+ 
+ 
+ class VariableLengthBuffer:
+@@ -22,6 +97,19 @@
+     def __init__(self, mapping: Mapping):
+         self.comm = mpi_comm().Split(mapping.pp_rank, mapping.moe_ep_rank)
+         self.buffer = None
++        if deep_ep_v2:
++            # V2 sizing/behavior knobs. num_max_tokens_per_rank is pinned
++            # UNIFORM across ranks and reused on every dispatch: V2's JIT
++            # substitutes it into the kernel template, and ranks that
++            # instantiate different templates deadlock the hybrid-dispatch
++            # prologue barrier.
++            self._max_tokens = int(
++                os.environ.get("TRTLLM_DEEP_EP_MAX_TOKENS_PER_RANK", "8192"))
++            self._num_topk = int(
++                os.environ.get("TRTLLM_DEEP_EP_NUM_TOPK", "8"))
++            self._pending_hidden = None
++            self._constructed_hidden = 0
++            self._pg = None
+ 
+     def __del__(self):
+         self.comm.Free()
+@@ -31,6 +119,9 @@
+ 
+             Reserve is a collective operation that requires all EP ranks to be sync
+         """
++        if deep_ep_v2:
++            self._reserve_v2(hidden_size)
++            return
+         # NOTES: you may also replace `get_*_config` with your auto-tuned results via all the tests
+         num_nvl_bytes, num_rdma_bytes = 0, 0
+         hidden_bytes = hidden_size * max(hidden_dtype.itemsize,
+@@ -57,10 +148,91 @@
+                                  num_nvl_peers=local_mpi_size(),
+                                  comm=self.comm)
+ 
++    def _reserve_v2(self, hidden_size: int):
++        """V2 branch of reserve: construct ElasticBuffer over a torch PG.
++
++        Under MetaInitMode (TRT-LLM weight-load prepass) the construction is
++        deferred: record the shape and build lazily on the first real call.
++        ElasticBuffer sizes itself from (num_max_tokens_per_rank, hidden,
++        num_topk); with the pinned token ceiling a re-reserve is a no-op
++        unless hidden grows.
++        """
++        if (self.buffer is not None and self._pending_hidden is None
++                and hidden_size <= self._constructed_hidden):
++            return
++        if _in_meta_init_mode():
++            self._pending_hidden = max(hidden_size, self._pending_hidden or 0)
++            return
++        self._construct_v2(max(hidden_size, self._pending_hidden or 0,
++                               getattr(self, "_constructed_hidden", 0)))
++
++    def _construct_v2(self, hidden_size: int):
++        import sys
++        _ensure_torch_dist_from_mpi()
++        import torch.distributed as dist
++        # TRT-LLM splits an EP communicator per (pp_rank, moe_ep_rank). The
++        # seam supports the attention-DP serving layout where the EP group
++        # spans the whole world (pp=1) — the configuration this path is
++        # validated for. Wider layouts need per-group PG plumbing upstream.
++        world_size = dist.get_world_size()
++        if self.comm.Get_size() != world_size:
++            raise RuntimeError(
++                f"[deep-ep-v2-seam] EP split size {self.comm.Get_size()} != "
++                f"world {world_size}: only the pp=1 attention-DP layout is "
++                f"supported by this seam")
++        if getattr(self, "_pg", None) is None:
++            self._pg = dist.new_group(ranks=list(range(world_size)),
++                                      backend="nccl")
++        pg = self._pg
++        gpu_timeout = int(os.environ.get("TRTLLM_DEEP_EP_GPU_TIMEOUT_SECS", "600"))
++        cpu_timeout = int(os.environ.get("TRTLLM_DEEP_EP_CPU_TIMEOUT_SECS", "600"))
++        print(f"[deep-ep-v2-seam] constructing deep_ep.ElasticBuffer "
++              f"(max_tokens/rank={self._max_tokens} hidden={hidden_size} "
++              f"topk={self._num_topk} timeouts={gpu_timeout}s)",
++              file=sys.stderr, flush=True)
++        del self.buffer  # Destruct before Construct
++        self.buffer = ElasticBuffer(
++            group=pg,
++            num_max_tokens_per_rank=self._max_tokens,
++            hidden=hidden_size,
++            num_topk=self._num_topk,
++            use_fp8_dispatch=False,
++            allow_hybrid_mode=True,
++            num_cpu_timeout_secs=cpu_timeout,
++            num_gpu_timeout_secs=gpu_timeout,
++        )
++        self._constructed_hidden = hidden_size
++        self._pending_hidden = None
++
+     def dispatch(self, x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+                  topk_idx: torch.Tensor, topk_weights: torch.Tensor,
+                  num_experts: int) -> \
+             Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], torch.Tensor, torch.Tensor, List, Tuple]:
++        if deep_ep_v2:
++            # Construct now if reserve() ran under MetaInitMode.
++            if self.buffer is None or self._pending_hidden is not None:
++                first_x = x if isinstance(x, torch.Tensor) else x[0]
++                self._reserve_v2(self._pending_hidden or first_x.shape[1])
++            # V2 needs no precomputed layout tensors — it infers the routing
++            # from topk_idx. num_max_tokens_per_rank is the pinned ceiling
++            # (uniform JIT template across ranks, see __init__).
++            if topk_weights is not None and topk_weights.dtype != torch.float32:
++                topk_weights = topk_weights.to(torch.float32)
++            # Seed previous_event from the current stream and hand tensor
++            # ownership to the comm stream — closes the compute->comm stream
++            # handoff race (V2 contract: previous_event requires
++            # allocate_on_comm_stream=True).
++            prev_evt = ElasticBuffer.capture()
++            recv_x, recv_topk_idx, recv_topk_weights, handle, event = \
++                self.buffer.dispatch(x, topk_idx=topk_idx,
++                                     topk_weights=topk_weights,
++                                     num_experts=num_experts,
++                                     num_max_tokens_per_rank=self._max_tokens,
++                                     previous_event=prev_evt,
++                                     allocate_on_comm_stream=True)
++            return recv_x, recv_topk_idx, recv_topk_weights, \
++                handle.num_recv_tokens_per_expert_list, handle
++
+         # NOTES: an optional `previous_event` means a CUDA event captured that you want to make it as a dependency
+         # of the dispatch kernel, it may be useful with communication-computation overlap. For more information, please
+         # refer to the docs of `Buffer.dispatch`
+@@ -83,6 +255,14 @@
+         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle
+ 
+     def combine(self, x: torch.Tensor, handle: Tuple) -> torch.Tensor:
++        if deep_ep_v2:
++            # num_sms=0 reuses the dispatch handle's SM count (a mismatch
++            # deadlocks the second combine); same stream handoff as dispatch.
++            prev_evt = ElasticBuffer.capture()
++            combined_x, _, _ = self.buffer.combine(
++                x, handle, previous_event=prev_evt,
++                allocate_on_comm_stream=True)
++            return combined_x
+         # Do MoE combine
+         # For more advanced usages, please refer to the docs of the `combine` function
+         combined_x, _, event = self.buffer.combine(x, handle)

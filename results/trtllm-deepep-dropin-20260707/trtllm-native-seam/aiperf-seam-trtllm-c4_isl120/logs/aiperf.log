@@ -1,0 +1,74 @@
+2026-07-07 12:26:44.376 - aiperf.cli_runner._single_run - INFO - Starting AIPerf System
+2026-07-07 12:26:44.380 - aiperf.config.resolution.resolvers - INFO - ✓ Tokenizer /tmp/hf/hub/models--Qwen--Qwen3-30B-A3B-FP8/snapshots/d206ba732169f29bb77fbf80fc2c4b81d4d30782/ detected
+2026-07-07 12:26:44.380 - aiperf.config.resolution.resolvers - INFO - 1 tokenizer validated • 0.0s
+2026-07-07 12:26:44.381 - aiperf.config.resolution.resolvers - INFO - Prefetching 1 tokenizer into HF cache...
+2026-07-07 12:26:46.991 - aiperf.config.resolution.resolvers - INFO -   Cached /tmp/hf/hub/models--Qwen--Qwen3-30B-A3B-FP8/snapshots/d206ba732169f29bb77fbf80fc2c4b81d4d30782/ (2.60s)
+2026-07-07 12:26:47.011 - aiperf.config.resolution.resolvers - INFO - 1 tokenizer cached • 2.6s
+2026-07-07 12:26:47.177 - server_metrics_manager - INFO - Server Metrics: Discovered 1 endpoints: ['http://127.0.0.1:8000/metrics']
+2026-07-07 12:26:47.181 - GPUTelemetryJSONLWriter_0b6c1865 - INFO - GPU telemetry export enabled: /tmp/aiperf-seam-trtllm-c4_isl120/gpu_telemetry_export.jsonl
+2026-07-07 12:26:47.191 - OTelMetricsResultsProcessor_7aba3c8e - INFO - Telemetry streaming is disabled (set --otel-url and/or --mlflow-tracking-uri to enable)
+2026-07-07 12:26:47.191 - records_manager - INFO - OTel metrics streamer is disabled and will not be used: Telemetry streaming is disabled (set --otel-url and/or --mlflow-tracking-uri to enable)
+2026-07-07 12:26:47.191 - RecordExportResultsProcessor_1ae2c72f - INFO - Record metrics export enabled: /tmp/aiperf-seam-trtllm-c4_isl120/profile_export.jsonl
+2026-07-07 12:26:47.266 - system_controller - INFO - Registered Worker Manager (id: 'worker_manager')
+2026-07-07 12:26:47.278 - system_controller - INFO - Registered Gpu Telemetry Manager (id: 'gpu_telemetry_manager')
+2026-07-07 12:26:47.279 - system_controller - INFO - Registered Dataset Manager (id: 'dataset_manager')
+2026-07-07 12:26:47.352 - system_controller - INFO - Registered Timing Manager (id: 'timing_manager')
+2026-07-07 12:26:47.374 - system_controller - INFO - Registered Server Metrics Manager (id: 'server_metrics_manager')
+2026-07-07 12:26:47.411 - system_controller - INFO - Registered Record Processor (id: 'record_processor_57f170e6')
+2026-07-07 12:26:47.416 - system_controller - INFO - Registered Records Manager (id: 'records_manager')
+2026-07-07 12:26:47.469 - system_controller - INFO - Registered Worker (id: 'worker_30f7ac93')
+2026-07-07 12:26:47.469 - system_controller - INFO - Registered Worker (id: 'worker_0c79a078')
+2026-07-07 12:26:47.469 - system_controller - INFO - Registered Worker (id: 'worker_4e5c775e')
+2026-07-07 12:26:47.524 - system_controller - INFO - Registered Worker (id: 'worker_eda35ffe')
+2026-07-07 12:26:47.659 - system_controller - INFO - AIPerf System is CONFIGURING
+2026-07-07 12:26:47.660 - system_controller - INFO - Configuring all services to start profiling
+2026-07-07 12:26:47.661 - timing_manager - INFO - Waiting for dataset to be configured before configuring timing
+2026-07-07 12:26:47.661 - InferenceResultParser_8064215e - INFO - Configuring tokenizers for inference result parser (resolve_alias: True)
+2026-07-07 12:26:47.661 - dataset_manager - INFO - Configuring tokenizer(s) for dataset manager
+2026-07-07 12:26:47.677 - gpu_telemetry_manager - WARNING - GPU Telemetry: http://localhost:9400/metrics is not reachable
+2026-07-07 12:26:47.678 - gpu_telemetry_manager - WARNING - GPU Telemetry: http://localhost:9401/metrics is not reachable
+2026-07-07 12:26:47.679 - system_controller - INFO - DCGM telemetry skipped: no DCGM endpoints reachable
+2026-07-07 12:26:49.668 - server_metrics_manager - INFO - Server Metrics: Capturing baseline metrics...
+2026-07-07 12:26:49.670 - http://127.0.0.1:8000/metrics - INFO - Endpoint 'http://127.0.0.1:8000/metrics' returned non-Prometheus content; probing fallback 'http://127.0.0.1:8000/prometheus/metrics' (TRT-LLM compatibility path).
+2026-07-07 12:26:49.671 - http://127.0.0.1:8000/metrics - WARNING - Disabling server metrics collection for http://127.0.0.1:8000/metrics: Prometheus fallback 'http://127.0.0.1:8000/prometheus/metrics' also failed (ClientResponseError(RequestInfo(url=URL('http://127.0.0.1:8000/prometheus/metrics'), method='GET', headers=<CIMultiDictProxy('Host': '127.0.0.1:8000', 'Accept': '*/*', 'Accept-Encoding': 'gzip, deflate, br', 'User-Agent': 'Python/3.10 aiohttp/3.13.5')>, real_url=URL('http://127.0.0.1:8000/prometheus/metrics')), (), status=404, message='Not Found', headers=<CIMultiDictProxy('Date': 'Tue, 07 Jul 2026 12:26:49 GMT', 'Server': 'uvicorn', 'Content-Length': '22', 'Content-Type': 'application/json')>)); original endpoint 'http://127.0.0.1:8000/metrics' returned non-Prometheus content. For TRT-LLM, set 'return_perf_metrics: true' in extra_llm_api_options.yaml to enable Prometheus exposition at /prometheus/metrics.. To suppress this warning, pass --no-server-metrics.
+2026-07-07 12:26:49.672 - system_controller - INFO - Server metrics enabled - 1/1 endpoint(s) reachable.
+2026-07-07 12:26:50.370 - InferenceResultParser_8064215e - INFO - Initialized tokenizers: {'d206ba732169f29bb77fbf80fc2c4b81d4d30782': {'class': 'Qwen2Tokenizer', 'name_or_path': '/tmp/hf/hub/models--Qwen--Qwen3-30B-A3B-FP8/snapshots/d206ba732169f29bb77fbf80fc2c4b81d4d30782/'}} in 2.71 seconds
+2026-07-07 12:26:50.476 - dataset_manager - INFO - Tokenizer(s) configured in 2.81 seconds
+2026-07-07 12:26:50.476 - dataset_manager - INFO - Configuring dataset for dataset_manager
+2026-07-07 12:26:50.895 - MemoryMapDatasetBackingStore_ece3451c - INFO - Memory-mapped backing store initialized (streaming to /tmp/aiperf_mmap_854fea3013d8/dataset.dat)
+2026-07-07 12:26:50.899 - MemoryMapDatasetBackingStore_ece3451c - INFO - Data file finalized: 40 conversations, 0.04 MB
+2026-07-07 12:26:50.899 - MemoryMapDatasetBackingStore_ece3451c - INFO - Index file created: /tmp/aiperf_mmap_854fea3013d8/index.dat
+2026-07-07 12:26:50.899 - dataset_manager - INFO - Backing store finalized: client_type=DatasetClientStoreType.MEMORY_MAP data_file_path=PosixPath('/tmp/aiperf_mmap_854fea3013d8/dataset.dat') index_file_path=PosixPath('/tmp/aiperf_mmap_854fea3013d8/index.dat') conversation_count=40 total_size_bytes=44505 compressed_data_file_path=None compressed_index_file_path=None compressed_size_bytes=0
+2026-07-07 12:26:50.900 - dataset_manager - INFO - sampling strategy: sequential, unique conversations: 40, unique turn count: 40
+2026-07-07 12:26:50.900 - dataset_manager - INFO - Generating inputs.json file at /tmp/aiperf-seam-trtllm-c4_isl120/inputs.json
+2026-07-07 12:26:50.902 - dataset_manager - INFO - inputs.json file generated in 0.00 seconds
+2026-07-07 12:26:50.908 - PhaseOrchestrator_ca99281c - INFO - Initialized 1 phase(s): ['Profiling']
+2026-07-07 12:26:51.116 - dataset_manager - INFO - Dataset client initialized and freed 40 conversations from memory
+2026-07-07 12:26:51.116 - dataset_manager - INFO - Dataset configured in 0.64 seconds
+2026-07-07 12:26:51.117 - system_controller - INFO - All services configured in 3.46 seconds
+2026-07-07 12:26:51.118 - system_controller - INFO - AIPerf System is CONFIGURED
+2026-07-07 12:26:51.119 - server_metrics_manager - INFO - Server Metrics: Started 1 collector(s) successfully
+2026-07-07 12:26:51.120 - system_controller - INFO - All services started profiling successfully
+2026-07-07 12:26:51.120 - system_controller - INFO - AIPerf System is PROFILING
+2026-07-07 12:26:51.121 - RateTiming - INFO - Creating interval generator: pattern=concurrency_burst, rate=None, smoothness=None
+2026-07-07 12:26:51.121 - PhaseRunner - NOTICE - Phase profiling started | target: 40 requests
+2026-07-07 12:26:51.123 - records_manager - INFO - Credit phase start: profiling
+2026-07-07 12:27:59.895 - PhaseRunner - NOTICE - Phase profiling sending complete | sent=40, completed=36, in_flight=4 | sessions: sent=40, completed=36
+2026-07-07 12:27:59.896 - records_manager - INFO - Sent 40 requests. Waiting for all to complete...
+2026-07-07 12:28:06.825 - PhaseRunner - NOTICE - Phase profiling complete | completed=40, cancelled=0, errors=0 | sessions: completed=40, cancelled=0 | elapsed=75.70s
+2026-07-07 12:28:06.825 - PhaseOrchestrator_ca99281c - NOTICE - All credits completed
+2026-07-07 12:28:06.826 - system_controller - INFO - Received credits complete from 'timing_manager'
+2026-07-07 12:28:06.826 - records_manager - INFO - Received CREDIT_PHASE_COMPLETE message, Phase complete: PhaseRecordsStats(phase=CreditPhase.PROFILING, start_ns=1783427211121815503, sent_end_ns=1783427279895280242, requests_end_ns=1783427286825043489, total_expected_requests=40, expected_duration_sec=None, expected_num_sessions=None, expected_grace_period_sec=None, final_requests_sent=None, final_requests_completed=40, final_requests_cancelled=0, final_request_errors=0, final_sent_sessions=None, final_completed_sessions=None, final_cancelled_sessions=None, timeout_triggered=False, grace_period_timeout_triggered=False, was_cancelled=False, records_end_ns=None, success_records=37, error_records=0)
+2026-07-07 12:28:06.826 - records_manager - NOTICE - All requests have completed, please wait for the results to be processed (currently 37 of 40 records processed)...
+2026-07-07 12:28:06.826 - records_manager - INFO - All credits complete, please wait for the results to be processed...
+2026-07-07 12:28:06.832 - records_manager - INFO - Processed 40 valid requests and 0 errors (40 total).
+2026-07-07 12:28:06.832 - records_manager - INFO - Received all records, processing now...
+2026-07-07 12:28:06.833 - server_metrics_manager - INFO - Server Metrics: Profiling complete, capturing final metrics...
+2026-07-07 12:28:06.834 - records_manager - INFO - Waiting 2.0s for server metrics flush period...
+2026-07-07 12:28:08.825 - records_manager - INFO - Processing records results...
+2026-07-07 12:28:08.830 - records_manager - INFO - _finalize_and_process_results completed
+2026-07-07 12:28:08.831 - system_controller - INFO - Waiting for server metrics results...
+2026-07-07 12:28:08.831 - system_controller - INFO - Waiting for server metrics results...
+2026-07-07 12:28:08.832 - system_controller - INFO - All results received, initiating shutdown
+2026-07-07 12:28:09.435 - ExporterManager - INFO - Exporting all records
+2026-07-07 12:28:09.484 - ExporterManager - INFO - Exporting console data

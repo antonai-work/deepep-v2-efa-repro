@@ -192,15 +192,27 @@ Gate: `ARM=deepep-sglang URL=http://127.0.0.1:30000 bash bench/aiperf/aiperf_swe
 **Measured (2026-07-07):** c4/c8/c32 = **34.5 / 67.3 / 255.2** agg tok/s,
 **0 errors**; c32 reproduces the 2026-06-20 campaign baseline (253) at 1.01x.
 
-## 6. Gate 4 — TRT-LLM + AIPerf (api-shim lane; native EP is an EFA wall)
+## 6. Gate 4 — TRT-LLM + AIPerf (native V2 seam; native EP is an EFA wall)
 
-TRT-LLM's native expert-parallel is MNNVL/IBGDA — dead on EFA. The working
-path (validated 2026-06-22: `AlltoallMethodType.DeepEP`, AIPerf 40 req/0 err)
-is the **api-shim**: `deep_ep.Buffer -> CompatBuffer -> ElasticBuffer`, plus
-an MPI->torch-PG bridge. Complete package (Dockerfile FROM
-`nvcr.io/nvidia/cuda:12.9.0-devel-ubuntu24.04`, shim source, 9-wall bring-up
-script, serve A/B, manifests, measured results):
-`trtllm/`.
+TRT-LLM's built-in expert-parallel transport is MNNVL/IBGDA — dead on EFA.
+The clean path (validated 2026-07-07, NO shim) is the **native seam patch**
+`patches/private-deltas/trtllm-0.21.0-deepep-v2-seam.patch`: one
+file (`deep_ep_utils.py`) on the public wheel, constructing `ElasticBuffer`
+directly (MPI->torch-PG bootstrap, MetaInitMode deferral, layout-free V2
+dispatch/combine, V1 fallback + `TRTLLM_DEEP_EP_FORCE_V1` escape). Apply
+into site-packages with `git apply -p1`; serve WITHOUT any `PYTHONPATH`
+shim. An upstream PR to NVIDIA/TensorRT-LLM carrying the same seam is in preparation.
+
+**Measured (2026-07-07, seam, 3-cell):** c4/c8/c32 = **67.6 / 142.4 / 563.3**
+agg tok/s, **0 errors**; log shows `[deep-ep-v2-seam]` PG+ctor x16 and zero
+shim lines. Matches the shim arm within noise.
+
+The legacy **api-shim** lane (`deep_ep.Buffer -> CompatBuffer ->
+ElasticBuffer` via sitecustomize, validated 2026-06-22 and re-validated
+2026-07-07) remains packaged for reference and for frozen-binary scenarios.
+Complete package (Dockerfile FROM `nvcr.io/nvidia/cuda:12.9.0-devel-
+ubuntu24.04`, shim source, 9-wall bring-up script, serve A/B, manifests,
+measured results): `trtllm/`.
 
 Key pins: `tensorrt_llm==0.21.0` (pypi.nvidia.com cp310/cp312 wheels) +
 `tensorrt==10.11.0`; torch 2.7.1/cu126 (wheel dep); deep_ep `_C` REBUILT
@@ -235,7 +247,7 @@ Per-wall troubleshooting table: `trtllm/INSTRUCTIONS.md`.
 | micro | D+C p50, EP16 2-node | <= 740us contract (measured 443.6us) |
 | vLLM | AIPerf c32 agg (EPNC=1) | ~145 tok/s, 0 err |
 | SGLang | AIPerf c32 agg | ~253-255 tok/s, 0 err |
-| TRT-LLM | AIPerf c4/c32, DeepEP arm | ~66 / ~587 tok/s, 0 err, `AlltoallMethodType.DeepEP` in log |
+| TRT-LLM | AIPerf c4/c32, DeepEP arm | ~66-68 / ~563-587 tok/s, 0 err, `AlltoallMethodType.DeepEP` in log (native seam and shim equivalent within noise) |
 
 EFA proof on clusters that expose hw_counters:
 `scripts/verify_efa_traffic.sh` (TX delta >= 1 GB). On pods without
