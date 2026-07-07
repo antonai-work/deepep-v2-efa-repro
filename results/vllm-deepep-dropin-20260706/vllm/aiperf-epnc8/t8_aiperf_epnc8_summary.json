@@ -1,0 +1,32 @@
+{
+  "date": "2026-07-07",
+  "arm": "vllm-epnc8 (EP_NUM_COMMS=8 multicomm, PUBLIC wheel + committed multicomm overlay patch)",
+  "vs_epnc1": "c4 2.02x (19.5->39.4), c8 1.97x (38.8->76.5), c32 1.89x (144.6->273.0) \u2014 reproduces the 2026-06 campaign 2.09x multicomm win on the public stack",
+  "requires": "scripts/patches/private-deltas/deepep-multicomm-{overlay,newfile}.patch applied to deepseek-ai/DeepEP@b306af06+trio and _C rebuilt; EP_NUM_COMMS=8 env",
+  "cells": {
+    "c32_isl120": {
+      "requests": 128.0,
+      "errors": [],
+      "agg_tok_s": 273.04,
+      "per_user_tok_s": 8.93,
+      "ttft_p50_ms": 279.8,
+      "itl_p50_ms": 106.2
+    },
+    "c4_isl120": {
+      "requests": 40.0,
+      "errors": [],
+      "agg_tok_s": 39.4,
+      "per_user_tok_s": 9.95,
+      "ttft_p50_ms": 195.8,
+      "itl_p50_ms": 100.4
+    },
+    "c8_isl120": {
+      "requests": 64.0,
+      "errors": [],
+      "agg_tok_s": 76.53,
+      "per_user_tok_s": 9.69,
+      "ttft_p50_ms": 236.7,
+      "itl_p50_ms": 102.7
+    }
+  }
+}

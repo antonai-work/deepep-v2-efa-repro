@@ -1,0 +1,5 @@
+AIPerf sweep: arm=vllm-epnc8 model=Qwen/Qwen3-30B-A3B-FP8 url=http://127.0.0.1:8000
+CELL c4_isl120 arm=vllm-epnc8 conc=4 isl=120 osl=128 reqs 40.0 agg_tps 39.4 per_user 9.95 ttft_p50_ms 195.8
+CELL c8_isl120 arm=vllm-epnc8 conc=8 isl=120 osl=128 reqs 64.0 agg_tps 76.53 per_user 9.69 ttft_p50_ms 236.7
+CELL c32_isl120 arm=vllm-epnc8 conc=32 isl=120 osl=128 reqs 128.0 agg_tps 273.04 per_user 8.93 ttft_p50_ms 279.8
+SWEEP_DONE arm=vllm-epnc8

@@ -1,8 +1,8 @@
 # DeepEP-V2 MoE on AWS EFA — reproduce every gate from PUBLIC roots only
 
 > New here? **Start with [GUIDE.md](GUIDE.md)** — what to run, in what order,
-> and what "pass" looks like. This page is the full recipe + measured numbers.
-> Framework coverage at a glance: section 9 (all six frameworks + the walls).
+> and what "pass" looks like. All measured numbers on one page:
+> **[RESULTS.md](RESULTS.md)**. Framework coverage at a glance: section 9.
 
 Reproduce all acceptance gates — the **micro D+C benchmark**, three
 **inference lanes with AIPerf** (vLLM, SGLang, TRT-LLM native seam), and two
@@ -148,7 +148,9 @@ vllm serve Qwen/Qwen3-30B-A3B-FP8 --enable-expert-parallel \
   --data-parallel-address <node0-ip> --data-parallel-rpc-port 29570 \
   [leader: --port 8000 --data-parallel-start-rank 0 | worker: --headless --data-parallel-start-rank 8]
 # env adds: VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE=1, VLLM_USE_DEEP_GEMM=0, EP_NUM_COMMS=1 (pure public)
-# EP_NUM_COMMS=8 (the 2.09x arm) additionally requires the multicomm overlay patch.
+# EP_NUM_COMMS=8 (the 2x arm — MEASURED on this public stack 2026-07-07:
+# c4/c8/c32 = 39.4/76.5/273.0 vs 19.5/38.8/144.6, 0 err, ITL halved)
+# additionally requires the multicomm overlay patch.
 ```
 
 Gate: `ARM=deepep-vllm bash bench/aiperf/aiperf_sweep.sh` (conc 4/8/32,

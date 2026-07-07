@@ -109,6 +109,8 @@ time, in one place:
 
 ## Reading the results
 
+All measured numbers are consolidated on one page: [RESULTS.md](RESULTS.md).
+
 Every gate's as-run artifacts are committed under `results/<gate>-*/`:
 AIPerf `profile_export_aiperf.json` (check `error_summary: []` and
 `request_count`), plus serve-log evidence (`provider_evidence.log` for the
