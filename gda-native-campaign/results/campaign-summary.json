@@ -1,0 +1,73 @@
+{
+  "campaign": "native GPU-initiated (kernel-posted-WQE) DeepEP-V2 type-5 EFA-GDA vs CPU-proxy GIN",
+  "hardware": "2x p5en.48xlarge (H200, 16 EFA NICs/node), 16 EP ranks, N=128 decode shape, 4 SMs, 17 QPs",
+  "banked_2026_07_14": {
+    "native_dispatch_p50_us": 338.5,
+    "proxy_dispatch_p50_us": 391.6,
+    "native_combine_p50_us": 480.7,
+    "proxy_combine_p50_us": 543.4,
+    "native_cached_dispatch_p50_us": 401.3,
+    "proxy_cached_dispatch_p50_us": 274.3,
+    "correctness": "dispatch+combine torch.equal == NCCL ref, >=2 reps, receiver-side landing proof"
+  },
+  "ab_matrix_2026_07_10": {
+    "type5_dispatch_us": 772.905,
+    "proxy_dispatch_us": 391.623,
+    "type5_cached_us": 471.414,
+    "proxy_cached_us": 274.274,
+    "type5_combine_us": 1061.0,
+    "proxy_combine_us": 543.361,
+    "note": "first valid interleaved A/B before the optimization ladder"
+  },
+  "optimization_ladder": [
+    {
+      "lever": "QP fanout (notify-QP reserve fix)",
+      "result": "dispatch 789.4->537.7 us, 3-rep validated"
+    },
+    {
+      "lever": "NQP5 production shape + QP17 ownership",
+      "result": "validated; baseline 386.2 us dispatch"
+    },
+    {
+      "lever": "B=8 batched doorbell",
+      "result": "refuted as dominant (-2.8 us)"
+    },
+    {
+      "lever": "L-E lazy completion",
+      "result": "-29.8 us dispatch; wait_completion -> 0%"
+    },
+    {
+      "lever": "L-A write-imm receiver counting",
+      "result": "falsified perf-negative (+382 us): sender WQE tax"
+    },
+    {
+      "lever": "C-1 combine lazy completion",
+      "result": "-90.8 us combine; packaged into baseline"
+    },
+    {
+      "lever": "provider batched-tail B=2",
+      "result": "correctness-safe, latency-negative (+198 us dispatch)"
+    },
+    {
+      "lever": "G1 tail-scope GPU",
+      "result": "runtime-refuted (0.57 us)"
+    }
+  ],
+  "rebank_2026_07_17": {
+    "put_many": "PARKED-BLOCKED-CODEGEN-FRAGILE-OPEN: 5/5 deterministic N=8 hang nondiag; diag build + per-descriptor scalar shim pass; 5 fix classes falsified; define-emission proven compiled-in (offline cubin byte-identical); SASS shows per-iteration counter reloads (load-hoist refuted); 9 warp-collective sites participation-safe",
+    "r1_combine_wait": "RETIRED: wait_completion 0.00% post-C-1 (pre-C-1 control 38.6%); residual = ring 38.9% + fence 33.8% + wqe 8.7%",
+    "r2_chunk_size": "DEAD-AT-SHAPE: 0/60910 combine prof rows carry AggregateRequests; chunk-final marker degenerates to per-token",
+    "agg_marker_redesign": "ENGAGED at K=4 (96670 K-boundary fires, 73% puts deferred) but CORRECTNESS-RED-INTERMITTENT (1/3 ON reps BAD=1512) - PARKED",
+    "overlap_datapoint": "73% doorbell+fence event reduction moved combine p50 ~0 us (valid pairs -7.2/+6.1): issue-side cost fully overlapped with wire time",
+    "r4_cached_dispatch": "ATTRIBUTED-TO-RECEIVER-FORWARD-POLL: 89.96% wait share, 8.96x wait/body, 882 median polls",
+    "conclusion": "remaining gap on all axes is EFA-SRD wire/readiness physics vs IB, not a code lever"
+  },
+  "reference_ratios": {
+    "deepep_v2_ib_reference_us": "118 dispatch /195 combine (ratio-only north star)",
+    "native_efa_vs_ib": "~2.9x dispatch, ~2.5x combine"
+  },
+  "ledgers": {
+    "falsified_entries": 377,
+    "iteration_examples": 163
+  }
+}
